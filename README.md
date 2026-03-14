@@ -108,13 +108,32 @@ python tools/get_token.py
 ```
 The script will prompt for your email, password, and 2FA code, then print the token. Copy and paste it into BambuHelper's web interface.
 
-**Using browser DevTools:**
+**Using browser DevTools (Chrome / Edge):**
 1. Open https://bambulab.com and log in to your account
-2. Open browser DevTools (F12) → Application → Cookies
-3. Find the `token` cookie from `bambulab.com`
-4. Copy its value and paste into BambuHelper's "Paste Token" field
+2. Press **F12** to open DevTools
+3. Go to the **Application** tab (click `>>` if you don't see it)
+4. In the left sidebar, expand **Cookies** → click `https://bambulab.com`
+5. Find the row named `token` in the cookie list
+6. Double-click the **Value** cell to select it, then **Ctrl+C** to copy
+7. Paste the value into BambuHelper's "Paste Token" field in the web interface
 
-The token is valid for approximately 3 months. When it expires, repeat the process.
+**Using browser DevTools (Firefox):**
+1. Open https://bambulab.com and log in to your account
+2. Press **F12** to open DevTools
+3. Go to the **Storage** tab
+4. In the left sidebar, expand **Cookies** → click `https://bambulab.com`
+5. Find the row named `token`
+6. Double-click the **Value** cell to select it, then **Ctrl+C** to copy
+7. Paste the value into BambuHelper's "Paste Token" field
+
+**Using browser DevTools (Safari):**
+1. Open https://bambulab.com and log in to your account
+2. Open **Develop** → **Show Web Inspector** (enable the Develop menu first in Safari Preferences → Advanced)
+3. Go to the **Storage** tab → **Cookies** → `bambulab.com`
+4. Find and copy the `token` value
+5. Paste it into BambuHelper's "Paste Token" field
+
+> **Note:** The token is valid for approximately 3 months. When it expires, the ESP32 will fail to connect — simply repeat the process above to get a new token. Make sure to select the correct **Server Region** (US/EU/CN) in the web interface to match your Bambu account's region.
 
 ## Web Interface
 

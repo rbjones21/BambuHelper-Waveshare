@@ -11,8 +11,8 @@
 //  Region-aware URL helpers
 // ---------------------------------------------------------------------------
 const char* getBambuBroker(CloudRegion region) {
+  // Bambu only has US and CN MQTT brokers — EU accounts use the US broker
   switch (region) {
-    case REGION_EU: return "eu.mqtt.bambulab.com";
     case REGION_CN: return "cn.mqtt.bambulab.com";
     default:        return "us.mqtt.bambulab.com";
   }
