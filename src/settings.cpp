@@ -120,6 +120,9 @@ void loadSettings() {
     snprintf(key, sizeof(key), "p%d_cuid", i);
     strlcpy(cfg.cloudUserId, prefs.getString(key, "").c_str(), sizeof(cfg.cloudUserId));
 
+    snprintf(key, sizeof(key), "p%d_region", i);
+    cfg.region = (CloudRegion)prefs.getUChar(key, REGION_US);
+
     // Zero out state
     memset(&printers[i].state, 0, sizeof(BambuState));
     strcpy(printers[i].state.gcodeState, "UNKNOWN");
@@ -232,6 +235,9 @@ void savePrinterConfig(uint8_t index) {
 
   snprintf(key, sizeof(key), "p%d_cuid", index);
   prefs.putString(key, cfg.cloudUserId);
+
+  snprintf(key, sizeof(key), "p%d_region", index);
+  prefs.putUChar(key, cfg.region);
 
   if (needOpen) prefs.end();
 }

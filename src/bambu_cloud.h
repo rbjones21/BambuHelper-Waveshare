@@ -2,6 +2,12 @@
 #define BAMBU_CLOUD_H
 
 #include <Arduino.h>
+#include "bambu_state.h"
+
+// Region-aware URL helpers
+const char* getBambuBroker(CloudRegion region);
+const char* getBambuApiBase(CloudRegion region);
+const char* getBambuTfaDomain(CloudRegion region);
 
 enum CloudResult {
   CLOUD_OK,
@@ -20,18 +26,18 @@ struct CloudPrinter {
 // Step 1: Login with email + password.
 // Returns CLOUD_NEED_VERIFY if Bambu requires a 2FA email code.
 // Returns CLOUD_OK if login succeeded (no 2FA), token saved to NVS.
-CloudResult cloudLogin(const char* email, const char* password);
+CloudResult cloudLogin(const char* email, const char* password, CloudRegion region);
 
 // Step 2: Submit the 6-digit verification code from email.
 // Uses tfaKey saved internally from the login response.
 // On success: saves token + userId to NVS, returns CLOUD_OK.
-CloudResult cloudVerifyCode(const char* email, const char* code);
+CloudResult cloudVerifyCode(const char* email, const char* code, CloudRegion region);
 
 // Fetch list of printers bound to the account.
 // token: the access token from NVS.
 // out: array to fill, maxDevices: array capacity.
 // Returns number of devices found (0 on error).
-int cloudFetchDevices(const char* token, CloudPrinter* out, int maxDevices);
+int cloudFetchDevices(const char* token, CloudPrinter* out, int maxDevices, CloudRegion region);
 
 // Extract user ID from JWT token payload.
 // Populates userId with "u_{uid}" format string.
@@ -39,6 +45,6 @@ bool cloudExtractUserId(const char* token, char* userId, size_t len);
 
 // Fetch userId from Bambu profile API (fallback for non-JWT tokens).
 // Populates userId with "u_{uid}" format string.
-bool cloudFetchUserId(const char* token, char* userId, size_t len);
+bool cloudFetchUserId(const char* token, char* userId, size_t len, CloudRegion region);
 
 #endif // BAMBU_CLOUD_H

@@ -8,6 +8,31 @@
 #include <mbedtls/base64.h>
 
 // ---------------------------------------------------------------------------
+//  Region-aware URL helpers
+// ---------------------------------------------------------------------------
+const char* getBambuBroker(CloudRegion region) {
+  switch (region) {
+    case REGION_EU: return "eu.mqtt.bambulab.com";
+    case REGION_CN: return "cn.mqtt.bambulab.com";
+    default:        return "us.mqtt.bambulab.com";
+  }
+}
+
+const char* getBambuApiBase(CloudRegion region) {
+  switch (region) {
+    case REGION_CN: return "https://api.bambulab.cn";
+    default:        return "https://api.bambulab.com";
+  }
+}
+
+const char* getBambuTfaDomain(CloudRegion region) {
+  switch (region) {
+    case REGION_CN: return "bambulab.cn";
+    default:        return "bambulab.com";
+  }
+}
+
+// ---------------------------------------------------------------------------
 //  Helpers
 // ---------------------------------------------------------------------------
 
@@ -231,10 +256,10 @@ static CloudResult processLoginResponse(int httpCode, const String& response,
 // ---------------------------------------------------------------------------
 //  Login with email + password
 // ---------------------------------------------------------------------------
-CloudResult cloudLogin(const char* email, const char* password) {
+CloudResult cloudLogin(const char* email, const char* password, CloudRegion region) {
   Serial.printf("CLOUD: Login attempt for %s\n", email);
 
-  String url = String(BAMBU_API_BASE) + "/v1/user-service/user/login";
+  String url = String(getBambuApiBase(region)) + "/v1/user-service/user/login";
 
   JsonDocument body;
   body["account"] = email;
@@ -256,13 +281,14 @@ CloudResult cloudLogin(const char* email, const char* password) {
 // ---------------------------------------------------------------------------
 //  Verify 2FA code
 // ---------------------------------------------------------------------------
-CloudResult cloudVerifyCode(const char* email, const char* code) {
+CloudResult cloudVerifyCode(const char* email, const char* code, CloudRegion region) {
   Serial.printf("CLOUD: Verify 2FA for %s code=%s totp=%d\n", email, code, s_isTotpMode);
 
   if (s_isTotpMode) {
     // TOTP authenticator: POST to bambulab.com/api/sign-in/tfa
     // Body: {tfaKey, tfaCode} — token comes back in Set-Cookie
-    const char* tfaUrl = "https://bambulab.com/api/sign-in/tfa";
+    char tfaUrl[64];
+    snprintf(tfaUrl, sizeof(tfaUrl), "https://%s/api/sign-in/tfa", getBambuTfaDomain(region));
 
     JsonDocument body;
     body["tfaKey"] = s_tfaKey;
@@ -314,7 +340,7 @@ CloudResult cloudVerifyCode(const char* email, const char* code) {
 
   } else {
     // Email verification: POST to login endpoint with {account, code}
-    String url = String(BAMBU_API_BASE) + "/v1/user-service/user/login";
+    String url = String(getBambuApiBase(region)) + "/v1/user-service/user/login";
 
     JsonDocument body;
     body["account"] = email;
@@ -333,8 +359,8 @@ CloudResult cloudVerifyCode(const char* email, const char* code) {
 // ---------------------------------------------------------------------------
 //  Fetch userId from profile API (fallback for non-JWT tokens)
 // ---------------------------------------------------------------------------
-bool cloudFetchUserId(const char* token, char* userId, size_t len) {
-  String url = String(BAMBU_API_BASE) + "/v1/user-service/my/profile";
+bool cloudFetchUserId(const char* token, char* userId, size_t len, CloudRegion region) {
+  String url = String(getBambuApiBase(region)) + "/v1/user-service/my/profile";
 
   String response;
   int httpCode = httpsRequest("GET", url.c_str(), nullptr, token, response);
@@ -365,8 +391,8 @@ bool cloudFetchUserId(const char* token, char* userId, size_t len) {
 // ---------------------------------------------------------------------------
 //  Fetch device list
 // ---------------------------------------------------------------------------
-int cloudFetchDevices(const char* token, CloudPrinter* out, int maxDevices) {
-  String url = String(BAMBU_API_BASE) + "/v1/iot-service/api/user/bind";
+int cloudFetchDevices(const char* token, CloudPrinter* out, int maxDevices, CloudRegion region) {
+  String url = String(getBambuApiBase(region)) + "/v1/iot-service/api/user/bind";
 
   String response;
   int httpCode = httpsRequest("GET", url.c_str(), nullptr, token, response);

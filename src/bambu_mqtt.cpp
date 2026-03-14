@@ -20,6 +20,7 @@ static unsigned long lastPushallRequest = 0;
 static uint32_t pushallSeqId = 0;
 static unsigned long connectTime = 0;
 static bool initialPushallSent = false;
+static unsigned long idleSince = 0;  // millis() when printer entered idle state
 
 bool mqttDebugLog = false;  // toggled via web UI
 
@@ -50,6 +51,15 @@ const char* mqttRcToString(int rc) {
 const MqttDiag& getMqttDiag() {
   diag.freeHeap = ESP.getFreeHeap();
   return diag;
+}
+
+// ---------------------------------------------------------------------------
+//  Free TLS + MQTT client memory
+// ---------------------------------------------------------------------------
+static void releaseClients() {
+  if (mqttClient) { delete mqttClient; mqttClient = nullptr; }
+  if (tlsClient)  { delete tlsClient;  tlsClient  = nullptr; }
+  initialized = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,8 +99,9 @@ static bool ensureClients() {
 
   PrinterConfig& cfg = activePrinter().config;
   if (isCloudMode(cfg.mode)) {
-    MQTT_LOG("setServer(%s, %d) [CLOUD]", BAMBU_CLOUD_BROKER, BAMBU_PORT);
-    mqttClient->setServer(BAMBU_CLOUD_BROKER, BAMBU_PORT);
+    const char* broker = getBambuBroker(cfg.region);
+    MQTT_LOG("setServer(%s, %d) [CLOUD]", broker, BAMBU_PORT);
+    mqttClient->setServer(broker, BAMBU_PORT);
   } else {
     MQTT_LOG("setServer(%s, %d) [LOCAL]", cfg.ip, BAMBU_PORT);
     mqttClient->setServer(cfg.ip, BAMBU_PORT);
@@ -274,9 +285,16 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     const char* state = print["gcode_state"];
     strncpy(s.gcodeState, state, 15);
     s.gcodeState[15] = '\0';
+    bool wasActive = s.printing;
     s.printing = (strcmp(state, "RUNNING") == 0 ||
                   strcmp(state, "PAUSE") == 0 ||
                   strcmp(state, "PREPARE") == 0);
+    // Track idle state for pushall backoff
+    if (s.printing) {
+      idleSince = 0;  // reset on active state
+    } else if (wasActive || idleSince == 0) {
+      idleSince = millis();
+    }
   }
 
   if (print["mc_percent"].is<int>())
@@ -379,15 +397,14 @@ void initBambuMqtt() {
 
   if (!cfg.enabled || notConfigured) {
     Serial.println("MQTT: Printer not configured, skipping");
-    if (mqttClient) { delete mqttClient; mqttClient = nullptr; }
-    if (tlsClient) { delete tlsClient; tlsClient = nullptr; }
-    initialized = false;
+    releaseClients();
     return;
   }
 
   initialPushallSent = false;
   connectTime = 0;
   lastReconnectAttempt = 0;
+  idleSince = 0;
   Serial.println("MQTT: Ready, will connect on next handle()");
 }
 
@@ -403,30 +420,38 @@ void handleBambuMqtt() {
   } else {
     mqttClient->loop();
 
-    // Pushall only for local mode (cloud broker pushes status automatically)
-    if (cfg.mode == CONN_LOCAL) {
-      // Delayed initial pushall
-      if (!initialPushallSent && connectTime > 0 &&
-          millis() - connectTime > BAMBU_PUSHALL_INITIAL_DELAY) {
-        esp_task_wdt_reset();
-        requestPushall();
-        initialPushallSent = true;
-      }
+    // Pushall: request full status from printer
+    // Cloud mode uses longer interval to avoid rate limiting
+    // Backoff when idle: 2x after 5min, 4x after 30min (capped at 10min)
+    unsigned long pushallInterval = isCloudMode(cfg.mode) ? BAMBU_PUSHALL_INTERVAL * 4 : BAMBU_PUSHALL_INTERVAL;
+    if (idleSince > 0) {
+      unsigned long idleMs = millis() - idleSince;
+      if (idleMs > 1800000UL) pushallInterval *= 4;       // >30 min idle
+      else if (idleMs > 300000UL) pushallInterval *= 2;    // >5 min idle
+      if (pushallInterval > 600000UL) pushallInterval = 600000UL;  // cap at 10 min
+    }
 
-      // Retry pushall if no data received within 10s of sending it
-      if (initialPushallSent && diag.messagesRx == 0 &&
-          millis() - lastPushallRequest > 10000) {
-        MQTT_LOG("No data after pushall, retrying...");
-        esp_task_wdt_reset();
-        requestPushall();
-      }
+    // Delayed initial pushall (after connect)
+    if (!initialPushallSent && connectTime > 0 &&
+        millis() - connectTime > BAMBU_PUSHALL_INITIAL_DELAY) {
+      esp_task_wdt_reset();
+      requestPushall();
+      initialPushallSent = true;
+    }
 
-      // Periodic pushall
-      if (initialPushallSent && diag.messagesRx > 0 &&
-          millis() - lastPushallRequest > BAMBU_PUSHALL_INTERVAL) {
-        esp_task_wdt_reset();
-        requestPushall();
-      }
+    // Retry pushall if no data received within 10s of sending it
+    if (initialPushallSent && diag.messagesRx == 0 &&
+        millis() - lastPushallRequest > 10000) {
+      MQTT_LOG("No data after pushall, retrying...");
+      esp_task_wdt_reset();
+      requestPushall();
+    }
+
+    // Periodic pushall
+    if (initialPushallSent && diag.messagesRx > 0 &&
+        millis() - lastPushallRequest > pushallInterval) {
+      esp_task_wdt_reset();
+      requestPushall();
     }
   }
 
@@ -451,5 +476,6 @@ void disconnectBambuMqtt() {
   if (mqttClient && mqttClient->connected()) {
     mqttClient->disconnect();
   }
+  releaseClients();
   activePrinter().state.connected = false;
 }

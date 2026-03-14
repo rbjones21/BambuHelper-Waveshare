@@ -194,6 +194,12 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
 
       <div id="cloudFields" style="display:none">
         <p id="cloudDesc" style="font-size:12px;color:#8B949E;margin:10px 0">Connects via Bambu Cloud.<br>Token valid ~3 months. Your password is NOT stored.</p>
+        <label for="region">Server Region</label>
+        <select id="region">
+          <option value="us" %REGION_US%>Americas (US)</option>
+          <option value="eu" %REGION_EU%>Europe (EU)</option>
+          <option value="cn" %REGION_CN%>China (CN)</option>
+        </select>
         <div id="cloudLoginSection">
           <label for="cl_email">Bambu Account Email</label>
           <input type="text" id="cl_email" value="%CL_EMAIL%" placeholder="user@example.com">
@@ -479,6 +485,7 @@ function savePrinter(){
   if(mode==='cloud'||mode==='cloud_all'){
     p.append('serial',document.getElementById('cl_serial').value);
     p.append('pname',document.getElementById('cl_pname').value);
+    p.append('region',document.getElementById('region').value);
   } else {
     p.append('pname',document.getElementById('pname').value);
     p.append('ip',document.getElementById('ip').value);
@@ -782,6 +789,11 @@ static String processTemplate(const String& html) {
   page.replace("%CODE%", cfg.accessCode);
   page.replace("%CL_EMAIL%", cloudEmail);
 
+  // Cloud region dropdown
+  page.replace("%REGION_US%", cfg.region == REGION_US ? "selected" : "");
+  page.replace("%REGION_EU%", cfg.region == REGION_EU ? "selected" : "");
+  page.replace("%REGION_CN%", cfg.region == REGION_CN ? "selected" : "");
+
   // Cloud status text
   if (isCloudMode(cfg.mode) && strlen(cloudEmail) > 0) {
     char clStatus[96];
@@ -921,6 +933,14 @@ static void handleSavePrinter() {
     else cfg.mode = CONN_LOCAL;
   }
 
+  // Cloud region
+  if (server.hasArg("region")) {
+    String rg = server.arg("region");
+    if (rg == "eu") cfg.region = REGION_EU;
+    else if (rg == "cn") cfg.region = REGION_CN;
+    else cfg.region = REGION_US;
+  }
+
   if (isCloudMode(cfg.mode)) {
     if (server.hasArg("serial")) strlcpy(cfg.serial, server.arg("serial").c_str(), sizeof(cfg.serial));
     if (server.hasArg("pname"))  strlcpy(cfg.name, server.arg("pname").c_str(), sizeof(cfg.name));
@@ -928,7 +948,7 @@ static void handleSavePrinter() {
     char tokenBuf[1200];
     if (loadCloudToken(tokenBuf, sizeof(tokenBuf))) {
       if (!cloudExtractUserId(tokenBuf, cfg.cloudUserId, sizeof(cfg.cloudUserId))) {
-        cloudFetchUserId(tokenBuf, cfg.cloudUserId, sizeof(cfg.cloudUserId));
+        cloudFetchUserId(tokenBuf, cfg.cloudUserId, sizeof(cfg.cloudUserId), cfg.region);
       }
     }
   } else {
@@ -1041,8 +1061,9 @@ static void handleDebugToggle() {
 static void handleCloudLogin() {
   String email = server.arg("email");
   String pass = server.arg("password");
+  CloudRegion region = printers[0].config.region;
 
-  CloudResult r = cloudLogin(email.c_str(), pass.c_str());
+  CloudResult r = cloudLogin(email.c_str(), pass.c_str(), region);
 
   JsonDocument doc;
   switch (r) {
@@ -1059,8 +1080,9 @@ static void handleCloudLogin() {
 static void handleCloudVerify() {
   String email = server.arg("email");
   String code = server.arg("code");
+  CloudRegion region = printers[0].config.region;
 
-  CloudResult r = cloudVerifyCode(email.c_str(), code.c_str());
+  CloudResult r = cloudVerifyCode(email.c_str(), code.c_str(), region);
 
   JsonDocument doc;
   if (r == CLOUD_OK) {
@@ -1068,7 +1090,7 @@ static void handleCloudVerify() {
     char tokenBuf[1200];
     if (loadCloudToken(tokenBuf, sizeof(tokenBuf))) {
       CloudPrinter devs[8];
-      int count = cloudFetchDevices(tokenBuf, devs, 8);
+      int count = cloudFetchDevices(tokenBuf, devs, 8, region);
       JsonArray arr = doc["printers"].to<JsonArray>();
       for (int i = 0; i < count; i++) {
         JsonObject d = arr.add<JsonObject>();
@@ -1092,8 +1114,9 @@ static void handleCloudDevices() {
     server.send(200, "application/json", "{\"printers\":[]}");
     return;
   }
+  CloudRegion region = printers[0].config.region;
   CloudPrinter devs[8];
-  int count = cloudFetchDevices(tokenBuf, devs, 8);
+  int count = cloudFetchDevices(tokenBuf, devs, 8, region);
 
   JsonDocument doc;
   JsonArray arr = doc["printers"].to<JsonArray>();
@@ -1117,11 +1140,12 @@ static void handleCloudToken() {
 
   // Save the token
   saveCloudToken(token.c_str());
+  CloudRegion region = printers[0].config.region;
 
   // Try to extract userId — JWT decode first, then profile API fallback
   char uid[32] = {0};
   if (!cloudExtractUserId(token.c_str(), uid, sizeof(uid))) {
-    if (!cloudFetchUserId(token.c_str(), uid, sizeof(uid))) {
+    if (!cloudFetchUserId(token.c_str(), uid, sizeof(uid), region)) {
       server.send(200, "application/json", "{\"status\":\"error\",\"message\":\"Could not extract userId from token.\"}");
       return;
     }
@@ -1148,7 +1172,7 @@ static void handleCloudToken() {
   char tokenBuf[1200];
   if (loadCloudToken(tokenBuf, sizeof(tokenBuf))) {
     CloudPrinter devs[8];
-    int count = cloudFetchDevices(tokenBuf, devs, 8);
+    int count = cloudFetchDevices(tokenBuf, devs, 8, region);
     if (count > 0) {
       JsonArray arr = doc["printers"].to<JsonArray>();
       for (int i = 0; i < count; i++) {

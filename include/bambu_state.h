@@ -5,6 +5,7 @@
 #include "config.h"
 
 enum ConnMode : uint8_t { CONN_LOCAL = 0, CONN_CLOUD = 1, CONN_CLOUD_ALL = 2 };
+enum CloudRegion : uint8_t { REGION_US = 0, REGION_EU = 1, REGION_CN = 2 };
 
 inline bool isCloudMode(ConnMode m) { return m == CONN_CLOUD || m == CONN_CLOUD_ALL; }
 
@@ -39,6 +40,7 @@ struct PrinterConfig {
   char accessCode[12];        // local mode only
   char name[24];              // friendly name
   char cloudUserId[32];       // cloud mode: "u_{uid}" for MQTT username
+  CloudRegion region;          // cloud mode: US, EU, or CN server region
 };
 
 struct PrinterSlot {
