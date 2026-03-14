@@ -24,5 +24,6 @@ void setScreenState(ScreenState state);
 ScreenState getScreenState();
 void setBacklight(uint8_t level);
 void applyDisplaySettings();  // re-apply rotation, bg, force redraw
+void triggerDisplayTransition(); // start printer-name overlay on rotation
 
 #endif // DISPLAY_UI_H

@@ -37,6 +37,10 @@
 #define BAMBU_USERNAME              "bblp"
 #define BAMBU_BUFFER_SIZE           16384   // 16KB for full pushall
 #define BAMBU_RECONNECT_INTERVAL    10000   // 10s between attempts
+#define BAMBU_BACKOFF_PHASE1        5       // first N attempts at normal interval
+#define BAMBU_BACKOFF_PHASE2_MS     60000   // 60s after phase 1 exhausted
+#define BAMBU_BACKOFF_PHASE2        10      // next N attempts at phase 2 interval
+#define BAMBU_BACKOFF_PHASE3_MS     120000  // 120s after phase 2 exhausted
 #define BAMBU_STALE_TIMEOUT         60000   // 60s no data = stale
 #define BAMBU_PUSHALL_INTERVAL      30000   // request full status every 30s
 #define BAMBU_PUSHALL_INITIAL_DELAY 2000    // wait 2s after connect
@@ -57,9 +61,22 @@
 #define NVS_NAMESPACE       "bambu"
 
 // =============================================================================
-//  Multi-printer (future)
+//  Multi-printer
 // =============================================================================
-#define MAX_PRINTERS        4
+#define MAX_PRINTERS          4       // NVS config slots
+#define MAX_ACTIVE_PRINTERS   2       // max simultaneous MQTT connections
+
+// =============================================================================
+//  Display rotation (multi-printer)
+// =============================================================================
+#define ROTATE_INTERVAL_MS    60000   // default auto-rotate: 1 min
+#define ROTATE_MIN_MS         10000   // min allowed interval (10s)
+#define ROTATE_MAX_MS         600000  // max allowed interval (10 min)
+
+// =============================================================================
+//  Physical button
+// =============================================================================
+#define BUTTON_DEFAULT_PIN    4       // default GPIO for physical button
 
 // =============================================================================
 //  Display refresh

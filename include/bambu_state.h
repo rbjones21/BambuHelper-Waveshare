@@ -54,4 +54,24 @@ inline PrinterSlot& activePrinter() {
   return printers[activePrinterIndex];
 }
 
+// ── Display rotation (multi-printer) ────────────────────────────────────────
+enum RotateMode : uint8_t {
+  ROTATE_OFF   = 0,   // show only activePrinterIndex
+  ROTATE_AUTO  = 1,   // cycle all connected printers
+  ROTATE_SMART = 2    // prioritize printing printer, rotate if both printing
+};
+
+struct RotationState {
+  RotateMode mode;
+  uint32_t intervalMs;
+  uint8_t displayIndex;           // which printer slot is currently shown
+  unsigned long lastRotateMs;
+};
+
+extern RotationState rotState;
+
+inline PrinterSlot& displayedPrinter() {
+  return printers[rotState.displayIndex];
+}
+
 #endif // BAMBU_STATE_H

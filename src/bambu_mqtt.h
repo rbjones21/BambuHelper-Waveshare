@@ -2,6 +2,7 @@
 #define BAMBU_MQTT_H
 
 #include <Arduino.h>
+#include "config.h"
 
 // Connection diagnostics exposed for display/web
 struct MqttDiag {
@@ -18,9 +19,13 @@ extern bool mqttDebugLog;   // verbose Serial logging (toggled via web)
 
 void initBambuMqtt();
 void handleBambuMqtt();
-void disconnectBambuMqtt();
-bool isPrinterConfigured();
-const MqttDiag& getMqttDiag();
+void disconnectBambuMqtt();              // disconnect all connections
+void disconnectBambuMqtt(uint8_t slot);  // disconnect specific slot
+
+bool isPrinterConfigured(uint8_t slot);
+bool isAnyPrinterConfigured();
+uint8_t getActiveConnCount();            // how many connections are live
+const MqttDiag& getMqttDiag(uint8_t slot = 0);
 
 // Human-readable error string for PubSubClient rc
 const char* mqttRcToString(int rc);

@@ -11,20 +11,25 @@
 #include <WiFiClientSecure.h>
 #include <esp_task_wdt.h>
 
-// MQTT client objects — lazily allocated on first connect
-static WiFiClientSecure* tlsClient = nullptr;
-static PubSubClient* mqttClient = nullptr;
-static bool initialized = false;
-static unsigned long lastReconnectAttempt = 0;
-static unsigned long lastPushallRequest = 0;
-static uint32_t pushallSeqId = 0;
-static unsigned long connectTime = 0;
-static bool initialPushallSent = false;
-static unsigned long idleSince = 0;  // millis() when printer entered idle state
+// ── Per-connection context ──────────────────────────────────────────────────
+struct MqttConn {
+  uint8_t slotIndex;
+  WiFiClientSecure* tls;
+  PubSubClient* mqtt;
+  MqttDiag diag;
+  unsigned long lastReconnectAttempt;
+  unsigned long lastPushallRequest;
+  uint32_t pushallSeqId;
+  unsigned long connectTime;
+  bool initialPushallSent;
+  unsigned long idleSince;
+  bool active;           // connection slot in use
+  uint16_t consecutiveFails;  // for exponential backoff
+};
 
-bool mqttDebugLog = false;  // toggled via web UI
+static MqttConn conns[MAX_ACTIVE_PRINTERS];
 
-static MqttDiag diag = {};
+bool mqttDebugLog = false;
 
 static void mqttCallback(char* topic, byte* payload, unsigned int length);
 
@@ -48,192 +53,110 @@ const char* mqttRcToString(int rc) {
   }
 }
 
-const MqttDiag& getMqttDiag() {
-  diag.freeHeap = ESP.getFreeHeap();
-  return diag;
+const MqttDiag& getMqttDiag(uint8_t slot) {
+  if (slot >= MAX_ACTIVE_PRINTERS) slot = 0;
+  conns[slot].diag.freeHeap = ESP.getFreeHeap();
+  return conns[slot].diag;
 }
 
 // ---------------------------------------------------------------------------
-//  Free TLS + MQTT client memory
+//  Free TLS + MQTT client memory for one connection
 // ---------------------------------------------------------------------------
-static void releaseClients() {
-  if (mqttClient) { delete mqttClient; mqttClient = nullptr; }
-  if (tlsClient)  { delete tlsClient;  tlsClient  = nullptr; }
-  initialized = false;
+static void releaseClients(MqttConn& c) {
+  if (c.mqtt) { delete c.mqtt; c.mqtt = nullptr; }
+  if (c.tls)  { delete c.tls;  c.tls  = nullptr; }
 }
 
 // ---------------------------------------------------------------------------
-//  Lazy allocation of TLS + MQTT clients
+//  Lazy allocation of TLS + MQTT clients for one connection
 // ---------------------------------------------------------------------------
-static bool ensureClients() {
-  if (tlsClient && mqttClient) return true;
+static bool ensureClients(MqttConn& c) {
+  if (c.tls && c.mqtt) return true;
 
   uint32_t freeHeap = ESP.getFreeHeap();
-  MQTT_LOG("ensureClients() heap=%u min=%u", freeHeap, BAMBU_MIN_FREE_HEAP);
+  MQTT_LOG("[%d] ensureClients() heap=%u min=%u", c.slotIndex, freeHeap, BAMBU_MIN_FREE_HEAP);
   if (freeHeap < BAMBU_MIN_FREE_HEAP) {
-    MQTT_LOG("NOT ENOUGH HEAP!");
+    MQTT_LOG("[%d] NOT ENOUGH HEAP!", c.slotIndex);
     return false;
   }
 
-  if (!tlsClient) {
-    tlsClient = new (std::nothrow) WiFiClientSecure();
-    if (!tlsClient) {
-      MQTT_LOG("Failed to allocate WiFiClientSecure!");
+  if (!c.tls) {
+    c.tls = new (std::nothrow) WiFiClientSecure();
+    if (!c.tls) {
+      MQTT_LOG("[%d] Failed to allocate WiFiClientSecure!", c.slotIndex);
       return false;
     }
-    MQTT_LOG("WiFiClientSecure allocated OK");
+    MQTT_LOG("[%d] WiFiClientSecure allocated OK", c.slotIndex);
   }
-  tlsClient->setInsecure();  // self-signed cert on local network
-  tlsClient->setTimeout(5);  // 5s TLS timeout to avoid blocking loop too long
+  c.tls->setInsecure();
+  c.tls->setTimeout(5);
 
-  if (!mqttClient) {
-    mqttClient = new (std::nothrow) PubSubClient(*tlsClient);
-    if (!mqttClient) {
-      MQTT_LOG("Failed to allocate PubSubClient!");
-      delete tlsClient;
-      tlsClient = nullptr;
+  if (!c.mqtt) {
+    c.mqtt = new (std::nothrow) PubSubClient(*c.tls);
+    if (!c.mqtt) {
+      MQTT_LOG("[%d] Failed to allocate PubSubClient!", c.slotIndex);
+      delete c.tls;
+      c.tls = nullptr;
       return false;
     }
-    MQTT_LOG("PubSubClient allocated OK");
+    MQTT_LOG("[%d] PubSubClient allocated OK", c.slotIndex);
   }
 
-  PrinterConfig& cfg = activePrinter().config;
+  PrinterConfig& cfg = printers[c.slotIndex].config;
   if (isCloudMode(cfg.mode)) {
     const char* broker = getBambuBroker(cfg.region);
-    MQTT_LOG("setServer(%s, %d) [CLOUD]", broker, BAMBU_PORT);
-    mqttClient->setServer(broker, BAMBU_PORT);
+    MQTT_LOG("[%d] setServer(%s, %d) [CLOUD]", c.slotIndex, broker, BAMBU_PORT);
+    c.mqtt->setServer(broker, BAMBU_PORT);
   } else {
-    MQTT_LOG("setServer(%s, %d) [LOCAL]", cfg.ip, BAMBU_PORT);
-    mqttClient->setServer(cfg.ip, BAMBU_PORT);
+    MQTT_LOG("[%d] setServer(%s, %d) [LOCAL]", c.slotIndex, cfg.ip, BAMBU_PORT);
+    c.mqtt->setServer(cfg.ip, BAMBU_PORT);
   }
-  mqttClient->setBufferSize(BAMBU_BUFFER_SIZE);
-  mqttClient->setCallback(mqttCallback);
-  mqttClient->setKeepAlive(BAMBU_KEEPALIVE);
+  c.mqtt->setBufferSize(BAMBU_BUFFER_SIZE);
+  c.mqtt->setCallback(mqttCallback);
+  c.mqtt->setKeepAlive(BAMBU_KEEPALIVE);
 
-  initialized = true;
   return true;
 }
 
 // ---------------------------------------------------------------------------
-//  Request pushall
+//  Request pushall for one connection
 // ---------------------------------------------------------------------------
-static void requestPushall() {
-  if (!mqttClient) return;
+static void requestPushall(MqttConn& c) {
+  if (!c.mqtt) return;
 
-  PrinterConfig& cfg = activePrinter().config;
+  PrinterConfig& cfg = printers[c.slotIndex].config;
   char topic[64];
   snprintf(topic, sizeof(topic), "device/%s/request", cfg.serial);
 
   char payload[128];
   snprintf(payload, sizeof(payload),
            "{\"pushing\":{\"sequence_id\":\"%u\",\"command\":\"pushall\"}}",
-           pushallSeqId++);
+           c.pushallSeqId++);
 
-  mqttClient->publish(topic, payload);
-  lastPushallRequest = millis();
+  c.mqtt->publish(topic, payload);
+  c.lastPushallRequest = millis();
 }
 
 // ---------------------------------------------------------------------------
-//  Reconnect
+//  Find which MqttConn owns a given serial (for callback routing)
 // ---------------------------------------------------------------------------
-static void reconnect() {
-  PrinterConfig& cfg = activePrinter().config;
-
-  // Validate config based on mode
-  if (cfg.mode == CONN_LOCAL && strlen(cfg.ip) == 0) return;
-  if (isCloudMode(cfg.mode) && (strlen(cfg.cloudUserId) == 0 || strlen(cfg.serial) == 0)) return;
-
-  unsigned long now = millis();
-  if (now - lastReconnectAttempt < BAMBU_RECONNECT_INTERVAL) return;
-
-  diag.attempts++;
-  diag.lastAttemptMs = now;
-  lastReconnectAttempt = now;
-
-  MQTT_LOG("=== reconnect attempt #%u [%s] ===", diag.attempts,
-           isCloudMode(cfg.mode) ? "CLOUD" : "LOCAL");
-  MQTT_LOG("serial=%s heap=%u WiFi=%d", cfg.serial, ESP.getFreeHeap(), WiFi.status());
-
-  if (!ensureClients()) {
-    MQTT_LOG("ensureClients() FAILED");
-    diag.lastRc = -2;
-    return;
-  }
-  if (mqttClient->connected()) return;
-
-  // TCP reachability test (local mode only — cloud broker is on the internet)
-  if (cfg.mode == CONN_LOCAL) {
-    WiFiClient tcp;
-    tcp.setTimeout(3);
-    MQTT_LOG("TCP test to %s:%d...", cfg.ip, BAMBU_PORT);
-    unsigned long tcpT0 = millis();
-    diag.tcpOk = tcp.connect(cfg.ip, BAMBU_PORT);
-    MQTT_LOG("TCP test %s in %lums", diag.tcpOk ? "OK" : "FAILED", millis() - tcpT0);
-    tcp.stop();
-    if (!diag.tcpOk) {
-      MQTT_LOG("Printer not reachable on network!");
-      diag.lastRc = -2;
-      return;
-    }
-  } else {
-    diag.tcpOk = true;  // skip for cloud
-  }
-
-  char clientId[32];
-  snprintf(clientId, sizeof(clientId), "bambu_%08x",
-           (uint32_t)(ESP.getEfuseMac() & 0xFFFFFFFF));
-
-  unsigned long t0 = millis();
-  esp_task_wdt_reset();
-
-  bool connected = false;
-  if (isCloudMode(cfg.mode)) {
-    // Cloud: load token from NVS, use cloudUserId as username
-    char tokenBuf[1200];
-    if (!loadCloudToken(tokenBuf, sizeof(tokenBuf))) {
-      MQTT_LOG("No cloud token in NVS!");
-      diag.lastRc = -2;
-      return;
-    }
-    MQTT_LOG("Calling connect(id=%s, user=%s) [CLOUD]...", clientId, cfg.cloudUserId);
-    connected = mqttClient->connect(clientId, cfg.cloudUserId, tokenBuf);
-  } else {
-    // Local: use bblp + access code
-    MQTT_LOG("Calling connect(id=%s, user=%s) [LOCAL]...", clientId, BAMBU_USERNAME);
-    connected = mqttClient->connect(clientId, BAMBU_USERNAME, cfg.accessCode);
-  }
-
-  if (connected) {
-    char topic[64];
-    snprintf(topic, sizeof(topic), "device/%s/report", cfg.serial);
-    mqttClient->subscribe(topic);
-
-    activePrinter().state.connected = true;
-    connectTime = millis();
-    initialPushallSent = false;
-    diag.lastRc = 0;
-    diag.connectDurMs = millis() - t0;
-    MQTT_LOG("CONNECTED in %lums, subscribed to %s", diag.connectDurMs, topic);
-  } else {
-    activePrinter().state.connected = false;
-    diag.lastRc = mqttClient->state();
-    diag.connectDurMs = millis() - t0;
-    MQTT_LOG("CONNECT FAILED rc=%d (%s) took %lums",
-             diag.lastRc, mqttRcToString(diag.lastRc), diag.connectDurMs);
-    if (isCloudMode(cfg.mode) && (diag.lastRc == 4 || diag.lastRc == 5)) {
-      MQTT_LOG("Cloud token may be expired — re-login via web UI");
+static MqttConn* findConnBySerial(const char* serial, size_t serialLen) {
+  for (uint8_t i = 0; i < MAX_ACTIVE_PRINTERS; i++) {
+    if (!conns[i].active) continue;
+    PrinterConfig& cfg = printers[conns[i].slotIndex].config;
+    if (strlen(cfg.serial) == serialLen &&
+        strncmp(cfg.serial, serial, serialLen) == 0) {
+      return &conns[i];
     }
   }
+  return nullptr;
 }
 
 // ---------------------------------------------------------------------------
-//  MQTT callback — delta merge
+//  Parse MQTT payload into a BambuState (extracted for routing)
 // ---------------------------------------------------------------------------
-static void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  esp_task_wdt_reset();
-  diag.messagesRx++;
-  MQTT_LOG("callback #%u topic=%s len=%u", diag.messagesRx, topic, length);
-
+static void parseMqttPayload(byte* payload, unsigned int length,
+                             BambuState& s, MqttDiag& diag, unsigned long& idleSince) {
   // Filter document to reduce parse memory
   JsonDocument filter;
   JsonObject pf = filter["print"].to<JsonObject>();
@@ -269,7 +192,6 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  BambuState& s = activePrinter().state;
   if (mqttDebugLog && print["gcode_state"].is<const char*>()) {
     Serial.printf("MQTT: state=%s progress=%d nozzle=%.0f bed=%.0f\n",
                   print["gcode_state"].as<const char*>(),
@@ -288,9 +210,8 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     s.printing = (strcmp(state, "RUNNING") == 0 ||
                   strcmp(state, "PAUSE") == 0 ||
                   strcmp(state, "PREPARE") == 0);
-    // Track idle state for pushall backoff
     if (s.printing) {
-      idleSince = 0;  // reset on active state
+      idleSince = 0;
     } else if (wasActive || idleSince == 0) {
       idleSince = millis();
     }
@@ -302,7 +223,6 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (print["mc_remaining_time"].is<int>())
     s.remainingMinutes = print["mc_remaining_time"].as<int>();
 
-  // Temperature fields (can arrive as int or float)
   if (print["nozzle_temper"].is<float>())
     s.nozzleTemp = print["nozzle_temper"].as<float>();
   else if (print["nozzle_temper"].is<int>())
@@ -344,7 +264,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   auto parseFan = [](JsonVariant v) -> int {
     if (v.is<int>()) return v.as<int>();
     if (v.is<const char*>()) return atoi(v.as<const char*>());
-    return -1;  // not present
+    return -1;
   };
 
   int fanVal;
@@ -360,13 +280,11 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   fanVal = parseFan(print["heatbreak_fan_speed"]);
   if (fanVal >= 0) s.heatbreakFanPct = (fanVal * 100) / 15;
 
-  // WiFi signal (Bambu sends as string like "-45dBm" or as int)
   if (print["wifi_signal"].is<const char*>())
     s.wifiSignal = atoi(print["wifi_signal"].as<const char*>());
   else if (print["wifi_signal"].is<int>())
     s.wifiSignal = print["wifi_signal"].as<int>();
 
-  // Speed level (1-4)
   if (print["spd_lvl"].is<int>())
     s.speedLevel = print["spd_lvl"].as<int>();
 
@@ -374,86 +292,180 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 // ---------------------------------------------------------------------------
-//  Public API
+//  MQTT callback — routes to correct printer slot by serial in topic
 // ---------------------------------------------------------------------------
-void initBambuMqtt() {
-  PrinterConfig& cfg = activePrinter().config;
-  Serial.println("MQTT: initBambuMqtt()");
-  Serial.printf("MQTT: ip='%s' serial='%s'\n", cfg.ip, cfg.serial);
+static void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  esp_task_wdt_reset();
 
-  memset(&diag, 0, sizeof(diag));
+  // Extract serial from topic: "device/{serial}/report"
+  const char* start = topic + 7;  // skip "device/"
+  const char* end = strchr(start, '/');
+  if (!end) return;
+  size_t serialLen = end - start;
 
-  BambuState& s = activePrinter().state;
-  memset(&s, 0, sizeof(BambuState));
-  s.connected = false;
-  s.printing = false;
-  strcpy(s.gcodeState, "UNKNOWN");
-
-  bool notConfigured = isCloudMode(cfg.mode)
-    ? (strlen(cfg.cloudUserId) == 0 || strlen(cfg.serial) == 0)
-    : (strlen(cfg.ip) == 0);
-
-  if (notConfigured) {
-    Serial.println("MQTT: Printer not configured, skipping");
-    releaseClients();
+  MqttConn* c = findConnBySerial(start, serialLen);
+  if (!c) {
+    MQTT_LOG("callback: unknown serial in topic %s", topic);
     return;
   }
 
-  initialPushallSent = false;
-  connectTime = 0;
-  lastReconnectAttempt = 0;
-  idleSince = 0;
-  Serial.println("MQTT: Ready, will connect on next handle()");
+  c->diag.messagesRx++;
+  MQTT_LOG("[%d] callback #%u topic=%s len=%u", c->slotIndex, c->diag.messagesRx, topic, length);
+
+  BambuState& s = printers[c->slotIndex].state;
+  parseMqttPayload(payload, length, s, c->diag, c->idleSince);
 }
 
-void handleBambuMqtt() {
-  PrinterConfig& cfg = activePrinter().config;
-  BambuState& s = activePrinter().state;
+// ---------------------------------------------------------------------------
+//  Reconnect one connection
+// ---------------------------------------------------------------------------
+static void reconnectConn(MqttConn& c) {
+  PrinterConfig& cfg = printers[c.slotIndex].config;
 
-  if (!mqttClient || !mqttClient->connected()) {
-    s.connected = false;
-    reconnect();
+  if (cfg.mode == CONN_LOCAL && strlen(cfg.ip) == 0) return;
+  if (isCloudMode(cfg.mode) && (strlen(cfg.cloudUserId) == 0 || strlen(cfg.serial) == 0)) return;
+
+  unsigned long now = millis();
+
+  // Exponential backoff: increase interval after repeated failures
+  unsigned long interval = BAMBU_RECONNECT_INTERVAL;
+  if (c.consecutiveFails >= BAMBU_BACKOFF_PHASE1 + BAMBU_BACKOFF_PHASE2) {
+    interval = BAMBU_BACKOFF_PHASE3_MS;
+  } else if (c.consecutiveFails >= BAMBU_BACKOFF_PHASE1) {
+    interval = BAMBU_BACKOFF_PHASE2_MS;
+  }
+
+  if (now - c.lastReconnectAttempt < interval) return;
+
+  c.diag.attempts++;
+  c.diag.lastAttemptMs = now;
+  c.lastReconnectAttempt = now;
+
+  MQTT_LOG("[%d] === reconnect attempt #%u (fails=%u, interval=%lus) [%s] ===",
+           c.slotIndex, c.diag.attempts, c.consecutiveFails, interval / 1000,
+           isCloudMode(cfg.mode) ? "CLOUD" : "LOCAL");
+  MQTT_LOG("[%d] serial=%s heap=%u WiFi=%d", c.slotIndex, cfg.serial, ESP.getFreeHeap(), WiFi.status());
+
+  if (!ensureClients(c)) {
+    MQTT_LOG("[%d] ensureClients() FAILED", c.slotIndex);
+    c.diag.lastRc = -2;
+    return;
+  }
+  if (c.mqtt->connected()) return;
+
+  // TCP reachability test (local mode only)
+  if (cfg.mode == CONN_LOCAL) {
+    WiFiClient tcp;
+    tcp.setTimeout(3);
+    MQTT_LOG("[%d] TCP test to %s:%d...", c.slotIndex, cfg.ip, BAMBU_PORT);
+    unsigned long tcpT0 = millis();
+    c.diag.tcpOk = tcp.connect(cfg.ip, BAMBU_PORT);
+    MQTT_LOG("[%d] TCP test %s in %lums", c.slotIndex, c.diag.tcpOk ? "OK" : "FAILED", millis() - tcpT0);
+    tcp.stop();
+    if (!c.diag.tcpOk) {
+      MQTT_LOG("[%d] Printer not reachable on network!", c.slotIndex);
+      c.diag.lastRc = -2;
+      c.consecutiveFails++;
+      return;
+    }
   } else {
-    mqttClient->loop();
+    c.diag.tcpOk = true;
+  }
 
-    // Pushall: request full status from printer
-    // Cloud mode: backoff when idle, then go fully passive (rely on delta stream)
-    // Local mode: always poll (no cloud concern, direct LAN connection)
-    bool cloudIdle = isCloudMode(cfg.mode) && idleSince > 0;
-    bool cloudPassive = cloudIdle && (millis() - idleSince > 600000UL);  // >10 min idle
+  // Unique client ID per connection slot
+  char clientId[32];
+  snprintf(clientId, sizeof(clientId), "bambu_%08x_%d",
+           (uint32_t)(ESP.getEfuseMac() & 0xFFFFFFFF), c.slotIndex);
 
-    unsigned long pushallInterval = isCloudMode(cfg.mode) ? BAMBU_PUSHALL_INTERVAL * 4 : BAMBU_PUSHALL_INTERVAL;
+  unsigned long t0 = millis();
+  esp_task_wdt_reset();
+
+  bool connected = false;
+  if (isCloudMode(cfg.mode)) {
+    char tokenBuf[1200];
+    if (!loadCloudToken(tokenBuf, sizeof(tokenBuf))) {
+      MQTT_LOG("[%d] No cloud token in NVS!", c.slotIndex);
+      c.diag.lastRc = -2;
+      return;
+    }
+    MQTT_LOG("[%d] connect(id=%s, user=%s) [CLOUD]...", c.slotIndex, clientId, cfg.cloudUserId);
+    connected = c.mqtt->connect(clientId, cfg.cloudUserId, tokenBuf);
+  } else {
+    MQTT_LOG("[%d] connect(id=%s, user=%s) [LOCAL]...", c.slotIndex, clientId, BAMBU_USERNAME);
+    connected = c.mqtt->connect(clientId, BAMBU_USERNAME, cfg.accessCode);
+  }
+
+  if (connected) {
+    char topic[64];
+    snprintf(topic, sizeof(topic), "device/%s/report", cfg.serial);
+    c.mqtt->subscribe(topic);
+
+    printers[c.slotIndex].state.connected = true;
+    c.connectTime = millis();
+    c.initialPushallSent = false;
+    c.consecutiveFails = 0;  // reset backoff on success
+    c.diag.lastRc = 0;
+    c.diag.connectDurMs = millis() - t0;
+    MQTT_LOG("[%d] CONNECTED in %lums, subscribed to %s", c.slotIndex, c.diag.connectDurMs, topic);
+  } else {
+    printers[c.slotIndex].state.connected = false;
+    c.consecutiveFails++;
+    c.diag.lastRc = c.mqtt->state();
+    c.diag.connectDurMs = millis() - t0;
+    MQTT_LOG("[%d] CONNECT FAILED rc=%d (%s) took %lums",
+             c.slotIndex, c.diag.lastRc, mqttRcToString(c.diag.lastRc), c.diag.connectDurMs);
+    if (isCloudMode(cfg.mode) && (c.diag.lastRc == 4 || c.diag.lastRc == 5)) {
+      MQTT_LOG("[%d] Cloud token may be expired — re-login via web UI", c.slotIndex);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Handle one connection (loop, pushall, stale)
+// ---------------------------------------------------------------------------
+static void handleConn(MqttConn& c) {
+  PrinterConfig& cfg = printers[c.slotIndex].config;
+  BambuState& s = printers[c.slotIndex].state;
+
+  if (!c.mqtt || !c.mqtt->connected()) {
+    s.connected = false;
+    reconnectConn(c);
+  } else {
+    c.mqtt->loop();
+
+    bool cloudIdle = isCloudMode(cfg.mode) && c.idleSince > 0;
+    bool cloudPassive = cloudIdle && (millis() - c.idleSince > 600000UL);
+
+    unsigned long pushallInterval = isCloudMode(cfg.mode)
+      ? BAMBU_PUSHALL_INTERVAL * 4
+      : BAMBU_PUSHALL_INTERVAL;
     if (cloudIdle && !cloudPassive) {
-      unsigned long idleMs = millis() - idleSince;
-      if (idleMs > 300000UL) pushallInterval *= 2;    // >5 min idle: 4 min
+      unsigned long idleMs = millis() - c.idleSince;
+      if (idleMs > 300000UL) pushallInterval *= 2;
     }
 
-    // Delayed initial pushall (after connect)
-    if (!initialPushallSent && connectTime > 0 &&
-        millis() - connectTime > BAMBU_PUSHALL_INITIAL_DELAY) {
+    if (!c.initialPushallSent && c.connectTime > 0 &&
+        millis() - c.connectTime > BAMBU_PUSHALL_INITIAL_DELAY) {
       esp_task_wdt_reset();
-      requestPushall();
-      initialPushallSent = true;
+      requestPushall(c);
+      c.initialPushallSent = true;
     }
 
-    // Retry pushall if no data received within 10s of sending it
-    if (initialPushallSent && diag.messagesRx == 0 &&
-        millis() - lastPushallRequest > 10000) {
-      MQTT_LOG("No data after pushall, retrying...");
+    if (c.initialPushallSent && c.diag.messagesRx == 0 &&
+        millis() - c.lastPushallRequest > 10000) {
+      MQTT_LOG("[%d] No data after pushall, retrying...", c.slotIndex);
       esp_task_wdt_reset();
-      requestPushall();
+      requestPushall(c);
     }
 
-    // Periodic pushall — skip entirely when cloud mode is fully passive
     if (!cloudPassive &&
-        initialPushallSent && diag.messagesRx > 0 &&
-        millis() - lastPushallRequest > pushallInterval) {
+        c.initialPushallSent && c.diag.messagesRx > 0 &&
+        millis() - c.lastPushallRequest > pushallInterval) {
       esp_task_wdt_reset();
-      requestPushall();
+      requestPushall(c);
     }
   }
 
-  // Stale timeout — cloud sends less frequently, use longer timeout
   unsigned long staleMs = isCloudMode(cfg.mode) ? BAMBU_STALE_TIMEOUT * 5 : BAMBU_STALE_TIMEOUT;
   if (s.lastUpdate > 0 && millis() - s.lastUpdate > staleMs) {
     if (s.printing) {
@@ -462,17 +474,103 @@ void handleBambuMqtt() {
   }
 }
 
-bool isPrinterConfigured() {
-  PrinterConfig& cfg = activePrinter().config;
+// ---------------------------------------------------------------------------
+//  Public API
+// ---------------------------------------------------------------------------
+bool isPrinterConfigured(uint8_t slot) {
+  if (slot >= MAX_PRINTERS) return false;
+  PrinterConfig& cfg = printers[slot].config;
   if (isCloudMode(cfg.mode))
     return strlen(cfg.serial) > 0 && strlen(cfg.cloudUserId) > 0;
   return strlen(cfg.ip) > 0;
 }
 
-void disconnectBambuMqtt() {
-  if (mqttClient && mqttClient->connected()) {
-    mqttClient->disconnect();
+bool isAnyPrinterConfigured() {
+  for (uint8_t i = 0; i < MAX_ACTIVE_PRINTERS; i++) {
+    if (isPrinterConfigured(i)) return true;
   }
-  releaseClients();
-  activePrinter().state.connected = false;
+  return false;
+}
+
+uint8_t getActiveConnCount() {
+  uint8_t count = 0;
+  for (uint8_t i = 0; i < MAX_ACTIVE_PRINTERS; i++) {
+    if (conns[i].active) count++;
+  }
+  return count;
+}
+
+void initBambuMqtt() {
+  Serial.println("MQTT: initBambuMqtt() — multi-printer");
+
+  // First: do all cloud API work (userId extraction) before any MQTT connects
+  for (uint8_t i = 0; i < MAX_ACTIVE_PRINTERS; i++) {
+    PrinterConfig& cfg = printers[i].config;
+    if (isPrinterConfigured(i) && isCloudMode(cfg.mode) && strlen(cfg.cloudUserId) == 0) {
+      Serial.printf("MQTT: [%d] cloud printer needs userId extraction\n", i);
+      // userId extraction uses HTTPClient (TLS) — must complete before MQTT TLS
+      char tokenBuf[1200];
+      if (loadCloudToken(tokenBuf, sizeof(tokenBuf))) {
+        cloudExtractUserId(tokenBuf, cfg.cloudUserId, sizeof(cfg.cloudUserId));
+        if (strlen(cfg.cloudUserId) > 0) {
+          Serial.printf("MQTT: [%d] userId=%s\n", i, cfg.cloudUserId);
+          savePrinterConfig(i);
+        }
+      }
+    }
+  }
+
+  // Initialize connection slots
+  for (uint8_t i = 0; i < MAX_ACTIVE_PRINTERS; i++) {
+    MqttConn& c = conns[i];
+    c.slotIndex = i;
+    memset(&c.diag, 0, sizeof(MqttDiag));
+    c.lastReconnectAttempt = 0;
+    c.lastPushallRequest = 0;
+    c.pushallSeqId = 0;
+    c.connectTime = 0;
+    c.initialPushallSent = false;
+    c.idleSince = 0;
+    c.consecutiveFails = 0;
+
+    BambuState& s = printers[i].state;
+    memset(&s, 0, sizeof(BambuState));
+    strcpy(s.gcodeState, "UNKNOWN");
+
+    if (isPrinterConfigured(i)) {
+      c.active = true;
+      PrinterConfig& cfg = printers[i].config;
+      Serial.printf("MQTT: [%d] '%s' serial=%s mode=%s — ready\n",
+                    i, cfg.name, cfg.serial,
+                    isCloudMode(cfg.mode) ? "CLOUD" : "LOCAL");
+    } else {
+      c.active = false;
+      releaseClients(c);
+      Serial.printf("MQTT: [%d] not configured, skipping\n", i);
+    }
+  }
+}
+
+void handleBambuMqtt() {
+  for (uint8_t i = 0; i < MAX_ACTIVE_PRINTERS; i++) {
+    if (!conns[i].active) continue;
+    handleConn(conns[i]);
+  }
+}
+
+void disconnectBambuMqtt() {
+  for (uint8_t i = 0; i < MAX_ACTIVE_PRINTERS; i++) {
+    disconnectBambuMqtt(i);
+  }
+}
+
+void disconnectBambuMqtt(uint8_t slot) {
+  if (slot >= MAX_ACTIVE_PRINTERS) return;
+  MqttConn& c = conns[slot];
+  if (c.mqtt && c.mqtt->connected()) {
+    c.mqtt->disconnect();
+  }
+  releaseClients(c);
+  c.active = false;
+  printers[slot].state.connected = false;
 }

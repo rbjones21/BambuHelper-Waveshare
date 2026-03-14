@@ -5,6 +5,7 @@
 // Global state
 PrinterSlot printers[MAX_PRINTERS];
 uint8_t activePrinterIndex = 0;
+RotationState rotState = { ROTATE_SMART, ROTATE_INTERVAL_MS, 0, 0 };
 char wifiSSID[33] = {0};
 char wifiPass[65] = {0};
 uint8_t brightness = 200;
@@ -12,6 +13,8 @@ DisplaySettings dispSettings;
 NetworkSettings netSettings;
 DisplayPowerSettings dpSettings;
 char cloudEmail[64] = {0};
+ButtonType buttonType = BTN_DISABLED;
+uint8_t buttonPin = BUTTON_DEFAULT_PIN;
 
 static Preferences prefs;
 
@@ -155,6 +158,18 @@ void loadSettings() {
   dpSettings.keepDisplayOn = prefs.getBool("dp_keepon", false);
   dpSettings.showClockAfterFinish = prefs.getBool("dp_clock", true);
 
+  // Rotation settings (multi-printer)
+  rotState.mode = (RotateMode)prefs.getUChar("rot_mode", ROTATE_SMART);
+  rotState.intervalMs = prefs.getULong("rot_intv", ROTATE_INTERVAL_MS);
+  if (rotState.intervalMs < ROTATE_MIN_MS) rotState.intervalMs = ROTATE_MIN_MS;
+  if (rotState.intervalMs > ROTATE_MAX_MS) rotState.intervalMs = ROTATE_MAX_MS;
+  rotState.displayIndex = 0;
+  rotState.lastRotateMs = 0;
+
+  // Button settings
+  buttonType = (ButtonType)prefs.getUChar("btn_type", BTN_DISABLED);
+  buttonPin = prefs.getUChar("btn_pin", BUTTON_DEFAULT_PIN);
+
   // Cloud email (display only)
   strlcpy(cloudEmail, prefs.getString("cl_email", "").c_str(), sizeof(cloudEmail));
 
@@ -237,6 +252,20 @@ void savePrinterConfig(uint8_t index) {
   prefs.putUChar(key, cfg.region);
 
   if (needOpen) prefs.end();
+}
+
+void saveRotationSettings() {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putUChar("rot_mode", rotState.mode);
+  prefs.putULong("rot_intv", rotState.intervalMs);
+  prefs.end();
+}
+
+void saveButtonSettings() {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putUChar("btn_type", buttonType);
+  prefs.putUChar("btn_pin", buttonPin);
+  prefs.end();
 }
 
 void resetSettings() {

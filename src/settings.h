@@ -42,16 +42,23 @@ struct DisplayPowerSettings {
   bool showClockAfterFinish;   // show clock instead of turning display off
 };
 
+// Button type
+enum ButtonType : uint8_t { BTN_DISABLED = 0, BTN_PUSH = 1, BTN_TOUCH = 2 };
+
 extern char wifiSSID[33];
 extern char wifiPass[65];
 extern uint8_t brightness;
 extern DisplaySettings dispSettings;
 extern NetworkSettings netSettings;
 extern DisplayPowerSettings dpSettings;
+extern ButtonType buttonType;
+extern uint8_t buttonPin;
 
 void loadSettings();
 void saveSettings();
 void savePrinterConfig(uint8_t index);
+void saveRotationSettings();
+void saveButtonSettings();
 void resetSettings();
 
 // Cloud token persistence (shared across printer slots)

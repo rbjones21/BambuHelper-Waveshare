@@ -41,6 +41,10 @@ When using Bambu Cloud, BambuHelper connects through Bambu Lab's cloud MQTT serv
 - **Auto AP mode** - creates WiFi hotspot on first boot or when WiFi is lost
 - **Smart redraw** - only redraws changed UI elements for smooth performance
 - **Customizable gauge colors** - per-gauge arc/label/value colors with preset themes
+- **Multi-printer support** - monitor up to 2 printers simultaneously with auto-rotating display
+- **Smart rotation** - automatically shows the printing printer; cycles between both when both are printing
+- **Physical button** - optional push button or TTP223 touch sensor to cycle printers and wake display
+- **Exponential backoff** - reconnect attempts to offline printers gradually slow down to conserve resources
 
 ## Hardware
 
@@ -220,6 +224,7 @@ src/
   web_server.cpp        Config portal (HTML embedded, token management)
   bambu_mqtt.cpp        MQTT over TLS, delta merge (local + cloud broker)
   bambu_cloud.cpp       Bambu Cloud helpers (region URLs, JWT userId extraction)
+  button.cpp            Physical button / touch sensor input
   display_ui.cpp        Screen state machine
   display_gauges.cpp    Arc gauges, progress bar, temp gauges
   display_anim.cpp      Animations (spinner, pulse, dots)
@@ -235,11 +240,69 @@ tools/
 - **LAN mode:** Bambu Lab printer with LAN mode enabled, printer and ESP32 on the same local network
 - **Cloud mode:** Bambu Lab account, ESP32 with internet access
 
+## Multi-Printer Monitoring
+
+BambuHelper supports monitoring up to 2 printers simultaneously via dual MQTT connections.
+
+### Rotation Modes
+
+| Mode | Behavior |
+|---|---|
+| **Smart** (default) | Shows the printing printer. If both are printing, cycles between them. If neither is printing, shows last active. |
+| **Auto-rotate** | Cycles through all connected printers at a configurable interval (10s – 10min). |
+| **Off** | Manually switch between printers using the physical button only. |
+
+### Physical Button
+
+An optional physical button can be connected to cycle between printers and wake the display from sleep.
+
+| Type | Wiring | How it works |
+|---|---|---|
+| **Push button** | One pin to configured GPIO, other pin to GND | Active LOW with internal pull-up |
+| **TTP223 touch sensor** | VCC→3.3V, GND→GND, SIG→configured GPIO | Active HIGH |
+
+The button type and GPIO pin are configurable in the web interface (Multi-Printer section) — no recompilation needed.
+
+### MQTT Reconnect Backoff
+
+When a printer is physically powered off, BambuHelper uses exponential backoff to avoid wasting resources on repeated connection attempts:
+
+| Phase | Attempts | Interval |
+|---|---|---|
+| Normal | First 5 | Every 10 seconds |
+| Phase 2 | Next 10 | Every 60 seconds |
+| Phase 3 | Beyond 15 | Every 120 seconds |
+
+When the printer comes back online, the backoff resets to normal immediately.
+
+## Troubleshooting
+
+### WiFi won't connect / drops frequently
+
+**SPI display cables near the ESP32 antenna can cause WiFi interference.** The ESP32-S3 Super Mini has a PCB antenna at one end of the board. If the SPI wires to the display run close to or over this antenna area, RF interference can prevent WiFi from connecting or cause frequent disconnections.
+
+**Fix:** Route the display cables away from the antenna end of the ESP32-S3. Even 1–2 cm of separation can make a significant difference. If using a breadboard, ensure the wires don't loop back over the ESP32 module.
+
+**Symptoms:**
+- "Connecting to WiFi" screen appears briefly, then falls back to AP mode
+- WiFi connects sometimes but drops after a few seconds
+- Works fine when display is disconnected
+
+### Printer shows "Connecting" but never connects
+
+- **LAN Direct:** Make sure the printer and ESP32 are on the same network. Check that LAN mode is enabled on the printer and the access code is correct.
+- **Bambu Cloud:** Verify the access token hasn't expired (~3 months validity). Re-extract from your browser and paste again. Check the server region matches your Bambu account.
+- If a printer is physically powered off, reconnect attempts will gradually slow down (backoff). It will reconnect automatically when the printer comes back online.
+
+### Display shows wrong printer / doesn't switch
+
+- Check rotation mode in the web interface (Multi-Printer section). Smart mode only switches automatically when a printer is actively printing.
+- Press the physical button (if configured) to manually cycle between printers.
+
 ## Future Plans
 
-- Multi-printer monitoring (up to 4 printers)
-- Physical buttons for switching between printers
 - OTA firmware updates
+- Multi-language support
 
 ## License
 

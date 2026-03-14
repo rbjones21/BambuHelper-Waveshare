@@ -6,6 +6,7 @@
 #include "wifi_manager.h"
 #include "display_ui.h"
 #include "config.h"
+#include "button.h"
 #include <WebServer.h>
 #include <ArduinoJson.h>
 
@@ -168,6 +169,12 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
   </div>
   <div class="section-content" id="sec-printer">
     <div class="section-body">
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button class="tab-btn" id="tab0" onclick="selectPrinterTab(0)"
+                style="flex:1;padding:8px;border:1px solid #30363D;border-radius:6px;background:#238636;color:#fff;cursor:pointer;font-weight:600">Printer 1</button>
+        <button class="tab-btn" id="tab1" onclick="selectPrinterTab(1)"
+                style="flex:1;padding:8px;border:1px solid #30363D;border-radius:6px;background:#0D1117;color:#8B949E;cursor:pointer">Printer 2</button>
+      </div>
       <div id="printerStatus" class="%STATUS_CLASS%">%STATUS_TEXT%</div>
       <label for="connmode">Connection Mode</label>
       <select id="connmode" onchange="toggleConnMode()">
@@ -329,7 +336,44 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
   </div>
 </div>
 
-<!-- ===== Section 4: WiFi & System ===== -->
+<!-- ===== Section 4: Multi-Printer ===== -->
+<div class="section" id="s-rotate">
+  <div class="section-header" onclick="toggleSection('rotate')">
+    <h2>Multi-Printer</h2>
+    <span class="arrow" id="arr-rotate">&#9654;</span>
+  </div>
+  <div class="section-content" id="sec-rotate">
+    <div class="section-body">
+      <label for="rotmode">Display Rotation Mode</label>
+      <select id="rotmode">
+        <option value="0" %RMODE_OFF%>Off (show selected printer only)</option>
+        <option value="1" %RMODE_AUTO%>Auto-rotate (cycle all connected)</option>
+        <option value="2" %RMODE_SMART%>Smart (prioritize printing)</option>
+      </select>
+      <label for="rotinterval">Rotation interval (seconds)</label>
+      <input type="number" id="rotinterval" min="10" max="600" value="%ROT_INTERVAL%">
+      <p style="font-size:11px;color:#8B949E;margin-top:4px">Smart mode shows the printing printer. Rotates only when both are printing.</p>
+
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid #30363D">
+        <label for="btntype">Physical Button</label>
+        <select id="btntype" onchange="toggleBtnPin()">
+          <option value="0" %BTN_OFF%>Disabled</option>
+          <option value="1" %BTN_PUSH%>Push Button (active LOW)</option>
+          <option value="2" %BTN_TOUCH%>TTP223 Touch (active HIGH)</option>
+        </select>
+        <div id="btnPinRow">
+          <label for="btnpin">Button GPIO Pin</label>
+          <input type="number" id="btnpin" min="1" max="48" value="%BTN_PIN%">
+          <p style="font-size:11px;color:#8B949E;margin-top:4px">Button switches between printers. Wakes display from sleep.</p>
+        </div>
+      </div>
+
+      <button type="button" class="btn btn-blue" onclick="saveRotation()">Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Section 5: WiFi & System ===== -->
 <div class="section" id="s-wifi">
   <div class="section-header" onclick="toggleSection('wifi')">
     <h2>WiFi &amp; System</h2>
@@ -430,6 +474,32 @@ function toggleSection(id){
   if(saved) toggleSection(saved); else toggleSection('printer');
 })();
 
+// --- Multi-printer tab selection ---
+var currentSlot=0;
+function selectPrinterTab(slot){
+  currentSlot=slot;
+  document.querySelectorAll('.tab-btn').forEach(function(btn,i){
+    btn.style.background=(i===slot)?'#238636':'#0D1117';
+    btn.style.color=(i===slot)?'#fff':'#8B949E';
+  });
+  fetch('/printer/config?slot='+slot).then(function(r){return r.json();}).then(function(d){
+    document.getElementById('connmode').value=d.mode;
+    document.getElementById('pname').value=d.name||'';
+    document.getElementById('ip').value=d.ip||'';
+    document.getElementById('serial').value=d.serial||'';
+    document.getElementById('code').value=d.code||'';
+    document.getElementById('cl_serial').value=d.serial||'';
+    document.getElementById('cl_pname').value=d.name||'';
+    document.getElementById('region').value=d.region||'us';
+    document.getElementById('cl_token').value='';
+    toggleConnMode();
+    var ps=document.getElementById('printerStatus');
+    if(d.connected){ps.className='status status-ok';ps.textContent='Connected';}
+    else if(d.configured){ps.className='status status-off';ps.textContent='Disconnected';}
+    else{ps.className='status status-na';ps.textContent='Not configured';}
+  }).catch(function(){});
+}
+
 // --- Utility ---
 function showToast(msg){
   var t=document.getElementById('toast');
@@ -455,6 +525,7 @@ toggleConnMode();
 // --- Save Printer (no restart) ---
 function savePrinter(){
   var p=new URLSearchParams();
+  p.append('slot',currentSlot);
   var mode=document.getElementById('connmode').value;
   p.append('connmode',mode);
   if(mode==='cloud_all'){
@@ -503,6 +574,25 @@ function cloudLogout(){
     document.getElementById('cloudStatus').innerHTML='<span style="color:#8B949E">No token set</span>';
     document.getElementById('cl_token').value='';
   });
+}
+
+// --- Multi-Printer rotation & button ---
+function toggleBtnPin(){
+  document.getElementById('btnPinRow').style.display=
+    document.getElementById('btntype').value==='0'?'none':'block';
+}
+toggleBtnPin();
+
+function saveRotation(){
+  var p=new URLSearchParams();
+  p.append('rotmode',document.getElementById('rotmode').value);
+  p.append('rotinterval',document.getElementById('rotinterval').value);
+  p.append('btntype',document.getElementById('btntype').value);
+  p.append('btnpin',document.getElementById('btnpin').value);
+  fetch('/save/rotation',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()})
+    .then(function(r){return r.json();})
+    .then(function(d){if(d.status==='ok') showToast('Settings saved');})
+    .catch(function(){showToast('Error');});
 }
 
 // --- Display ---
@@ -571,11 +661,17 @@ function toggleDebug(on){
 function refreshDiag(){
   fetch('/debug').then(r=>r.json()).then(d=>{
     var h='';
-    h+='<div class="stat-row"><span>MQTT:</span><span class="stat-val">'+(d.connected?'<span style="color:#3FB950">Connected</span>':'<span style="color:#F85149">Disconnected</span>')+'</span></div>';
-    h+='<div class="stat-row"><span>Attempts:</span><span class="stat-val">'+d.attempts+'</span></div>';
-    h+='<div class="stat-row"><span>Messages RX:</span><span class="stat-val">'+d.messages+'</span></div>';
-    h+='<div class="stat-row"><span>Last TCP:</span><span class="stat-val">'+(d.tcp_ok?'<span style="color:#3FB950">OK</span>':'<span style="color:#F85149">Failed</span>')+'</span></div>';
-    if(d.last_rc!==0) h+='<div class="stat-row"><span>Last error:</span><span class="stat-val" style="color:#F85149">'+d.rc_text+' (rc='+d.last_rc+')</span></div>';
+    if(d.printers){
+      d.printers.forEach(function(p){
+        h+='<div style="margin-bottom:8px;padding:6px;border-left:2px solid '+(p.connected?'#3FB950':'#F85149')+'">';
+        h+='<b style="color:#E6EDF3">'+p.name+'</b> (slot '+p.slot+')<br>';
+        h+='<div class="stat-row"><span>MQTT:</span><span class="stat-val">'+(p.connected?'<span style="color:#3FB950">Connected</span>':'<span style="color:#F85149">Disconnected</span>')+'</span></div>';
+        h+='<div class="stat-row"><span>Attempts:</span><span class="stat-val">'+p.attempts+'</span></div>';
+        h+='<div class="stat-row"><span>Messages RX:</span><span class="stat-val">'+p.messages+'</span></div>';
+        if(p.last_rc!==0) h+='<div class="stat-row"><span>Last error:</span><span class="stat-val" style="color:#F85149">'+p.rc_text+'</span></div>';
+        h+='</div>';
+      });
+    }
     h+='<div class="stat-row"><span>Free heap:</span><span class="stat-val">'+Math.round(d.heap/1024)+'KB</span></div>';
     h+='<div class="stat-row"><span>Uptime:</span><span class="stat-val">'+Math.round(d.uptime/60)+'min</span></div>';
     document.getElementById('diagInfo').innerHTML=h;
@@ -584,9 +680,9 @@ function refreshDiag(){
 refreshDiag();
 setInterval(refreshDiag,5000);
 
-// --- Live stats ---
+// --- Live stats (shows currently selected tab's printer) ---
 setInterval(function(){
-  fetch('/status').then(r=>r.json()).then(d=>{
+  fetch('/status?slot='+currentSlot).then(r=>r.json()).then(d=>{
     var h='';
     if(d.display_off) h+='<div class="stat-row"><span>Display:</span><span class="stat-val" style="color:#F85149">Off</span></div>';
     if(d.connected){
@@ -595,16 +691,17 @@ setInterval(function(){
       h+='<div class="stat-row"><span>Bed:</span><span class="stat-val">'+d.bed+'/'+d.bed_t+'&deg;C</span></div>';
       if(d.progress>0) h+='<div class="stat-row"><span>Progress:</span><span class="stat-val">'+d.progress+'%</span></div>';
       if(d.fan>0) h+='<div class="stat-row"><span>Fan:</span><span class="stat-val">'+d.fan+'%</span></div>';
-    } else {
+    } else if(d.configured) {
       h+='<span style="color:#8B949E">Not connected (printer may be off)</span>';
+    } else {
+      h+='<span style="color:#8B949E">Not configured</span>';
     }
     document.getElementById('liveStats').innerHTML=h;
     var ps=document.getElementById('printerStatus');
-    var cls=d.connected?'status-ok':'status-off';
-    var txt=d.connected?'Connected':'Disconnected / Printer Off';
-    if(d.display_off){cls='status-na';txt+=' (Display Off)';}
-    ps.className='status '+cls;
-    ps.textContent=txt;
+    if(d.connected){ps.className='status status-ok';ps.textContent='Connected';}
+    else if(d.configured){ps.className='status status-off';ps.textContent='Disconnected / Printer Off';}
+    else{ps.className='status status-na';ps.textContent='Not configured';}
+    if(d.display_off && d.connected){ps.textContent+=' (Display Off)';}
   }).catch(function(){});
 }, 3000);
 </script>
@@ -715,10 +812,25 @@ static String processTemplate(const String& html) {
   if (st.connected) {
     page.replace("%STATUS_CLASS%", "status status-ok");
     page.replace("%STATUS_TEXT%", "Connected");
-  } else {
+  } else if (isPrinterConfigured(0)) {
     page.replace("%STATUS_CLASS%", "status status-off");
     page.replace("%STATUS_TEXT%", "Disconnected");
+  } else {
+    page.replace("%STATUS_CLASS%", "status status-na");
+    page.replace("%STATUS_TEXT%", "Not configured");
   }
+
+  // Rotation mode (multi-printer)
+  page.replace("%RMODE_OFF%", rotState.mode == ROTATE_OFF ? "selected" : "");
+  page.replace("%RMODE_AUTO%", rotState.mode == ROTATE_AUTO ? "selected" : "");
+  page.replace("%RMODE_SMART%", rotState.mode == ROTATE_SMART ? "selected" : "");
+  page.replace("%ROT_INTERVAL%", String(rotState.intervalMs / 1000));
+
+  // Button settings
+  page.replace("%BTN_OFF%", buttonType == BTN_DISABLED ? "selected" : "");
+  page.replace("%BTN_PUSH%", buttonType == BTN_PUSH ? "selected" : "");
+  page.replace("%BTN_TOUCH%", buttonType == BTN_TOUCH ? "selected" : "");
+  page.replace("%BTN_PIN%", String(buttonPin));
 
   return page;
 }
@@ -779,7 +891,11 @@ static void handleRoot() {
 
 // Save printer settings only (no restart — reinit MQTT)
 static void handleSavePrinter() {
-  PrinterConfig& cfg = printers[0].config;
+  uint8_t slot = 0;
+  if (server.hasArg("slot")) slot = server.arg("slot").toInt();
+  if (slot >= MAX_ACTIVE_PRINTERS) slot = 0;
+
+  PrinterConfig& cfg = printers[slot].config;
   if (server.hasArg("connmode")) {
     String cm = server.arg("connmode");
     if (cm == "cloud_all") cfg.mode = CONN_CLOUD_ALL;
@@ -815,10 +931,10 @@ static void handleSavePrinter() {
     if (server.hasArg("code"))   strlcpy(cfg.accessCode, server.arg("code").c_str(), sizeof(cfg.accessCode));
   }
 
-  savePrinterConfig(0);
+  savePrinterConfig(slot);
 
-  // Reinit MQTT with new config
-  disconnectBambuMqtt();
+  // Reinit MQTT — disconnect changed slot, then reinit all
+  disconnectBambuMqtt(slot);
   initBambuMqtt();
 
   server.send(200, "application/json", "{\"status\":\"ok\"}");
@@ -853,11 +969,15 @@ static void handleApply() {
 }
 
 static void handleStatus() {
-  BambuState& st = printers[0].state;
-  PrinterConfig& cfg = printers[0].config;
+  uint8_t slot = 0;
+  if (server.hasArg("slot")) slot = server.arg("slot").toInt();
+  if (slot >= MAX_ACTIVE_PRINTERS) slot = 0;
+
+  BambuState& st = printers[slot].state;
 
   JsonDocument doc;
   doc["connected"] = st.connected;
+  doc["configured"] = isPrinterConfigured(slot);
   doc["state"] = st.gcodeState;
   doc["progress"] = st.progress;
   doc["nozzle"] = (int)st.nozzleTemp;
@@ -884,18 +1004,25 @@ static void handleReset() {
 }
 
 static void handleDebug() {
-  const MqttDiag& d = getMqttDiag();
-  BambuState& st = printers[0].state;
-
   JsonDocument doc;
-  doc["connected"] = st.connected;
-  doc["attempts"] = d.attempts;
-  doc["messages"] = d.messagesRx;
-  doc["last_rc"] = d.lastRc;
-  doc["rc_text"] = mqttRcToString(d.lastRc);
-  doc["tcp_ok"] = d.tcpOk;
-  doc["heap"] = d.freeHeap;
-  doc["connect_ms"] = d.connectDurMs;
+
+  JsonArray arr = doc["printers"].to<JsonArray>();
+  for (uint8_t i = 0; i < MAX_ACTIVE_PRINTERS; i++) {
+    if (!isPrinterConfigured(i)) continue;
+    const MqttDiag& d = getMqttDiag(i);
+    BambuState& st = printers[i].state;
+    JsonObject p = arr.add<JsonObject>();
+    p["slot"] = i;
+    p["name"] = printers[i].config.name;
+    p["connected"] = st.connected;
+    p["attempts"] = d.attempts;
+    p["messages"] = d.messagesRx;
+    p["last_rc"] = d.lastRc;
+    p["rc_text"] = mqttRcToString(d.lastRc);
+    p["tcp_ok"] = d.tcpOk;
+  }
+
+  doc["heap"] = ESP.getFreeHeap();
   doc["uptime"] = millis() / 1000;
   doc["debug_log"] = mqttDebugLog;
 
@@ -916,6 +1043,60 @@ static void handleCloudLogout() {
   server.send(200, "text/plain", "OK");
 }
 
+// Get printer config for a specific slot (multi-printer tabs)
+static void handlePrinterConfig() {
+  uint8_t slot = 0;
+  if (server.hasArg("slot")) slot = server.arg("slot").toInt();
+  if (slot >= MAX_ACTIVE_PRINTERS) slot = 0;
+
+  PrinterConfig& cfg = printers[slot].config;
+  BambuState& st = printers[slot].state;
+
+  JsonDocument doc;
+  doc["mode"] = isCloudMode(cfg.mode) ? "cloud_all" : "local";
+  doc["name"] = cfg.name;
+  doc["ip"] = cfg.ip;
+  doc["serial"] = cfg.serial;
+  doc["code"] = cfg.accessCode;
+  doc["region"] = cfg.region == REGION_EU ? "eu" : (cfg.region == REGION_CN ? "cn" : "us");
+  doc["connected"] = st.connected;
+  doc["configured"] = isPrinterConfigured(slot);
+
+  String json;
+  serializeJson(doc, json);
+  server.send(200, "application/json", json);
+}
+
+// Save rotation settings (multi-printer)
+static void handleSaveRotation() {
+  if (server.hasArg("rotmode")) {
+    uint8_t mode = server.arg("rotmode").toInt();
+    if (mode <= 2) rotState.mode = (RotateMode)mode;
+  }
+  if (server.hasArg("rotinterval")) {
+    uint32_t sec = server.arg("rotinterval").toInt();
+    uint32_t ms = sec * 1000;
+    if (ms < ROTATE_MIN_MS) ms = ROTATE_MIN_MS;
+    if (ms > ROTATE_MAX_MS) ms = ROTATE_MAX_MS;
+    rotState.intervalMs = ms;
+  }
+  saveRotationSettings();
+
+  // Button settings
+  if (server.hasArg("btntype")) {
+    uint8_t bt = server.arg("btntype").toInt();
+    if (bt <= 2) buttonType = (ButtonType)bt;
+  }
+  if (server.hasArg("btnpin")) {
+    uint8_t bp = server.arg("btnpin").toInt();
+    if (bp > 0 && bp <= 48) buttonPin = bp;
+  }
+  saveButtonSettings();
+  initButton();
+
+  server.send(200, "application/json", "{\"status\":\"ok\"}");
+}
+
 // Captive portal: redirect any unknown request to root
 static void handleNotFound() {
   if (isAPMode()) {
@@ -933,6 +1114,8 @@ void initWebServer() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/save/wifi", HTTP_POST, handleSaveWifi);
   server.on("/save/printer", HTTP_POST, handleSavePrinter);
+  server.on("/save/rotation", HTTP_POST, handleSaveRotation);
+  server.on("/printer/config", HTTP_GET, handlePrinterConfig);
   server.on("/apply", HTTP_POST, handleApply);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/reset", HTTP_GET, handleReset);

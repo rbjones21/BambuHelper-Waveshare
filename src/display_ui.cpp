@@ -70,6 +70,13 @@ void applyDisplaySettings() {
   forceRedraw = true;
 }
 
+void triggerDisplayTransition() {
+  // Clear previous state so everything redraws for the new printer
+  memset(&prevState, 0, sizeof(prevState));
+  tft.fillScreen(dispSettings.bgColor);
+  forceRedraw = true;
+}
+
 void setScreenState(ScreenState state) {
   currentScreen = state;
 }
@@ -199,7 +206,7 @@ static void drawConnectingMQTT() {
   drawAnimDots(tft, SCREEN_W / 2 + tw / 2, SCREEN_H / 2 - 6, CLR_TEXT);
 
   // Show printer name/IP
-  PrinterSlot& p = activePrinter();
+  PrinterSlot& p = displayedPrinter();
   tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
   tft.setTextFont(1);
   tft.drawString(p.config.ip, SCREEN_W / 2, SCREEN_H / 2 + 20);
@@ -214,7 +221,7 @@ static void drawConnectingMQTT() {
   }
 
   // Diagnostics info
-  const MqttDiag& d = getMqttDiag();
+  const MqttDiag& d = getMqttDiag(rotState.displayIndex);
   if (d.attempts > 0) {
     tft.fillRect(0, SCREEN_H / 2 + 48, SCREEN_W, 72, CLR_BG);
     tft.setTextFont(1);
@@ -278,12 +285,12 @@ static void drawIdleNoPrinter() {
 }
 
 static void drawIdle() {
-  if (!isPrinterConfigured()) {
+  if (!isAnyPrinterConfigured()) {
     drawIdleNoPrinter();
     return;
   }
 
-  PrinterSlot& p = activePrinter();
+  PrinterSlot& p = displayedPrinter();
   BambuState& s = p.state;
 
   bool stateChanged = forceRedraw || (strcmp(s.gcodeState, prevState.gcodeState) != 0);
@@ -360,7 +367,7 @@ static void drawIdle() {
 //  Layout: LED bar | header | 2x3 gauge grid | info line
 // ---------------------------------------------------------------------------
 static void drawPrinting() {
-  PrinterSlot& p = activePrinter();
+  PrinterSlot& p = displayedPrinter();
   BambuState& s = p.state;
 
   bool progChanged = forceRedraw || (s.progress != prevState.progress);
@@ -416,6 +423,15 @@ static void drawPrinting() {
     tft.setTextFont(2);
     tft.fillCircle(SCREEN_W - 8 - tft.textWidth(s.gcodeState) - 10, 17, 4, badgeColor);
     tft.drawString(s.gcodeState, SCREEN_W - 8, 17);
+
+    // Printer indicator dots (multi-printer)
+    if (getActiveConnCount() > 1) {
+      for (uint8_t di = 0; di < MAX_ACTIVE_PRINTERS; di++) {
+        if (!isPrinterConfigured(di)) continue;
+        uint16_t dotClr = (di == rotState.displayIndex) ? CLR_GREEN : CLR_TEXT_DARK;
+        tft.fillCircle(SCREEN_W / 2 - 5 + di * 10, 10, 3, dotClr);
+      }
+    }
   }
 
   // === Row 1: Progress | Nozzle | Bed (y=30-100) ===
@@ -540,37 +556,100 @@ static void drawPrinting() {
 }
 
 // ---------------------------------------------------------------------------
-//  Screen: Finished
+//  Screen: Finished (same layout as printing, but with 2 gauges + status)
 // ---------------------------------------------------------------------------
 static void drawFinished() {
-  PrinterSlot& p = activePrinter();
+  PrinterSlot& p = displayedPrinter();
   BambuState& s = p.state;
 
-  if (forceRedraw) {
-    // H2-style full bar at 100%
-    drawLedProgressBar(tft, 0, 100);
+  bool tempChanged = forceRedraw ||
+                     (s.nozzleTemp != prevState.nozzleTemp) ||
+                     (s.nozzleTarget != prevState.nozzleTarget) ||
+                     (s.bedTemp != prevState.bedTemp) ||
+                     (s.bedTarget != prevState.bedTarget);
 
+  const int16_t gR = 32;
+  const int16_t gaugeLeft  = 72;   // two gauges centered on 240px
+  const int16_t gaugeRight = 168;
+  const int16_t gaugeY = 80;
+
+  // === H2-style LED progress bar at 100% (y=0-5) ===
+  if (forceRedraw) {
+    drawLedProgressBar(tft, 0, 100);
+  }
+
+  // === Header bar (y=7-25) — same as printing screen ===
+  if (forceRedraw) {
+    uint16_t hdrBg = dispSettings.bgColor;
+    tft.fillRect(0, 7, SCREEN_W, 20, hdrBg);
+
+    // Printer name (left)
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextFont(2);
+    tft.setTextColor(CLR_TEXT, hdrBg);
+    const char* name = (p.config.name[0] != '\0') ? p.config.name : "Printer";
+    tft.drawString(name, 6, 17);
+
+    // FINISH badge (right)
+    tft.setTextDatum(MR_DATUM);
+    tft.setTextColor(CLR_GREEN, hdrBg);
+    tft.setTextFont(2);
+    tft.fillCircle(SCREEN_W - 8 - tft.textWidth("FINISH") - 10, 17, 4, CLR_GREEN);
+    tft.drawString("FINISH", SCREEN_W - 8, 17);
+
+    // Printer indicator dots (multi-printer)
+    if (getActiveConnCount() > 1) {
+      for (uint8_t di = 0; di < MAX_ACTIVE_PRINTERS; di++) {
+        if (!isPrinterConfigured(di)) continue;
+        uint16_t dotClr = (di == rotState.displayIndex) ? CLR_GREEN : CLR_TEXT_DARK;
+        tft.fillCircle(SCREEN_W / 2 - 5 + di * 10, 10, 3, dotClr);
+      }
+    }
+  }
+
+  // === Row 1: Nozzle | Bed (two gauges centered) ===
+  if (tempChanged) {
+    drawTempGauge(tft, gaugeLeft, gaugeY, gR,
+                  s.nozzleTemp, s.nozzleTarget, 300.0f,
+                  dispSettings.nozzle.arc, "Nozzle", nullptr, forceRedraw,
+                  &dispSettings.nozzle);
+
+    drawTempGauge(tft, gaugeRight, gaugeY, gR,
+                  s.bedTemp, s.bedTarget, 120.0f,
+                  dispSettings.bed.arc, "Bed", nullptr, forceRedraw,
+                  &dispSettings.bed);
+  }
+
+  // === "Print Complete!" status ===
+  if (forceRedraw) {
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(CLR_GREEN, CLR_BG);
     tft.setTextFont(4);
-    tft.drawString("Print Complete!", SCREEN_W / 2, 40);
-
-    // Start completion animation
-    drawCompletionAnim(tft, SCREEN_W / 2, SCREEN_H / 2, true);
+    tft.drawString("Print Complete!", SCREEN_W / 2, 148);
   }
 
-  // Animate
-  drawCompletionAnim(tft, SCREEN_W / 2, SCREEN_H / 2, false);
+  // === File name ===
+  if (forceRedraw) {
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextFont(2);
+    tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
+    if (s.subtaskName[0] != '\0') {
+      char truncName[26];
+      strncpy(truncName, s.subtaskName, 25);
+      truncName[25] = '\0';
+      tft.drawString(truncName, SCREEN_W / 2, 178);
+    }
+  }
 
-  // File name
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextFont(2);
-  tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
-  if (s.subtaskName[0] != '\0') {
-    char truncName[26];
-    strncpy(truncName, s.subtaskName, 25);
-    truncName[25] = '\0';
-    tft.drawString(truncName, SCREEN_W / 2, SCREEN_H - 30);
+  // === Bottom status bar — WiFi (y=218-236) ===
+  if (forceRedraw) {
+    tft.fillRect(0, 218, SCREEN_W, 22, CLR_BG);
+    tft.setTextFont(1);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
+    char wifiBuf[20];
+    snprintf(wifiBuf, sizeof(wifiBuf), "WiFi: %d dBm", s.wifiSignal);
+    tft.drawString(wifiBuf, SCREEN_W / 2, 230);
   }
 }
 
@@ -642,6 +721,6 @@ void updateDisplay() {
   }
 
   // Save state for next smart-redraw comparison
-  memcpy(&prevState, &activePrinter().state, sizeof(BambuState));
+  memcpy(&prevState, &displayedPrinter().state, sizeof(BambuState));
   forceRedraw = false;
 }
