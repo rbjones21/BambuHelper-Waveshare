@@ -60,6 +60,8 @@ ESP32-S3 SuperMini: https://a.aliexpress.com/_Eyk9GdA
 
 Optional: TTP223 touch button or standard push button for multi-printer switching (auto printer switching works without button anyway, change settings in web interface)
 
+Optional case seen on picture: https://makerworld.com/en/models/2501721
+
 ### Default Wiring
 
 | Display Pin | ESP32-S3 GPIO |
@@ -79,6 +81,9 @@ Touch TTP223 button is optional, it is used to switch between printers, you may 
 
 ![wiring](img/wiring.png)
 
+### Assembly Video
+
+[![Assembly Video](https://img.youtube.com/vi/hsyamsU5UZE/maxresdefault.jpg)](https://youtu.be/hsyamsU5UZE)
 
 ## Flashing
 
