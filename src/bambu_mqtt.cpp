@@ -177,10 +177,7 @@ static void parseMqttPayload(byte* payload, unsigned int length,
   pf["heatbreak_fan_speed"] = true;
   pf["wifi_signal"] = true;
   pf["spd_lvl"] = true;
-  // H2D/H2C dual nozzle
-  JsonObject ef = filter["print"]["extruder"].to<JsonObject>();
-  ef["info"] = true;
-  ef["state"] = true;
+  // Note: H2D/H2C extruder data is parsed separately from raw payload (see below)
 
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, payload, length,
@@ -190,10 +187,47 @@ static void parseMqttPayload(byte* payload, unsigned int length,
     return;
   }
 
+  // H2D/H2C dual nozzle: parse extruder directly from raw payload
+  // (bypasses ArduinoJson filter which strips it due to deep nesting)
+  const char* extPos = (const char*)memmem(payload, length, "\"extruder\":", 11);
+  if (extPos) {
+    const char* objStart = extPos + 11;  // skip past "extruder":
+    // Skip whitespace
+    while (*objStart == ' ' || *objStart == '\t') objStart++;
+    if (*objStart == '{') {
+      JsonDocument extDoc;
+      if (!deserializeJson(extDoc, objStart)) {
+        JsonArray info = extDoc["info"];
+        if (info.size() >= 2) {
+          if (!s.dualNozzle) Serial.println("MQTT: dual nozzle DETECTED (H2D/H2C)");
+          s.dualNozzle = true;
+
+          if (extDoc["state"].is<unsigned int>()) {
+            uint32_t st = extDoc["state"].as<unsigned int>();
+            s.activeNozzle = (st >> 4) & 0x0F;
+            if (s.activeNozzle > 1) s.activeNozzle = 0;
+          }
+
+          for (JsonObject entry : info) {
+            if (!entry["id"].is<int>()) continue;
+            uint8_t id = entry["id"].as<int>();
+            if (id == s.activeNozzle && entry["temp"].is<unsigned int>()) {
+              uint32_t packed = entry["temp"].as<unsigned int>();
+              s.nozzleTemp   = (float)(packed & 0xFFFF);
+              s.nozzleTarget = (float)(packed >> 16);
+              s.lastUpdate = millis();
+              MQTT_LOG("dual nozzle=%d temp=%.0f target=%.0f", s.activeNozzle, s.nozzleTemp, s.nozzleTarget);
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
   JsonObject print = doc["print"];
   if (print.isNull()) {
-    MQTT_LOG("no 'print' key (info/system msg)");
-    return;
+    return;  // no print data in this message
   }
 
   if (mqttDebugLog && print["gcode_state"].is<const char*>()) {
@@ -227,15 +261,19 @@ static void parseMqttPayload(byte* payload, unsigned int length,
   if (print["mc_remaining_time"].is<int>())
     s.remainingMinutes = print["mc_remaining_time"].as<int>();
 
-  if (print["nozzle_temper"].is<float>())
-    s.nozzleTemp = print["nozzle_temper"].as<float>();
-  else if (print["nozzle_temper"].is<int>())
-    s.nozzleTemp = print["nozzle_temper"].as<int>();
+  // For dual-nozzle (H2D/H2C): nozzle_temper is the INACTIVE nozzle — skip it
+  // Active nozzle temp comes from extruder.info[] parsed below
+  if (!s.dualNozzle) {
+    if (print["nozzle_temper"].is<float>())
+      s.nozzleTemp = print["nozzle_temper"].as<float>();
+    else if (print["nozzle_temper"].is<int>())
+      s.nozzleTemp = print["nozzle_temper"].as<int>();
 
-  if (print["nozzle_target_temper"].is<float>())
-    s.nozzleTarget = print["nozzle_target_temper"].as<float>();
-  else if (print["nozzle_target_temper"].is<int>())
-    s.nozzleTarget = print["nozzle_target_temper"].as<int>();
+    if (print["nozzle_target_temper"].is<float>())
+      s.nozzleTarget = print["nozzle_target_temper"].as<float>();
+    else if (print["nozzle_target_temper"].is<int>())
+      s.nozzleTarget = print["nozzle_target_temper"].as<int>();
+  }
 
   if (print["bed_temper"].is<float>())
     s.bedTemp = print["bed_temper"].as<float>();
@@ -291,34 +329,6 @@ static void parseMqttPayload(byte* payload, unsigned int length,
 
   if (print["spd_lvl"].is<int>())
     s.speedLevel = print["spd_lvl"].as<int>();
-
-  // H2D/H2C dual nozzle: extruder.info[] has packed temps, extruder.state has active ID
-  JsonObject extruder = print["extruder"];
-  if (!extruder.isNull()) {
-    JsonArray info = extruder["info"];
-    if (info.size() >= 2) {
-      s.dualNozzle = true;
-
-      // Active nozzle from state bits 4-7
-      if (extruder["state"].is<int>()) {
-        uint32_t state = extruder["state"].as<unsigned int>();
-        s.activeNozzle = (state >> 4) & 0x0F;
-        if (s.activeNozzle > 1) s.activeNozzle = 0;
-      }
-
-      // Extract active nozzle temp from packed integer: high word=target, low word=current
-      for (JsonObject entry : info) {
-        if (!entry["id"].is<int>() || !entry["temp"].is<int>()) continue;
-        uint8_t id = entry["id"].as<int>();
-        if (id == s.activeNozzle) {
-          uint32_t packed = entry["temp"].as<unsigned int>();
-          s.nozzleTemp   = (float)(packed & 0xFFFF);
-          s.nozzleTarget = (float)(packed >> 16);
-          break;
-        }
-      }
-    }
-  }
 
   s.lastUpdate = millis();
 }
