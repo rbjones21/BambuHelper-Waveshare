@@ -14,16 +14,15 @@ void drawClock() {
   struct tm now;
   if (!getLocalTime(&now, 0)) return;
 
-  // Only redraw when minute changes (resetClock() forces redraw)
   if (now.tm_min == prevMinute) return;
   prevMinute = now.tm_min;
 
   uint16_t bg = dispSettings.bgColor;
 
   // Clear clock area
-  tft.fillRect(0, 50, 240, 140, bg);
+  tft.fillRect(0, 100, SCREEN_W, 280, bg);
 
-  // Time — large 7-segment font
+  // Time — large font
   char timeBuf[12];
   if (netSettings.use24h) {
     snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", now.tm_hour, now.tm_min);
@@ -32,24 +31,26 @@ void drawClock() {
     if (h == 0) h = 12;
     snprintf(timeBuf, sizeof(timeBuf), "%2d:%02d", h, now.tm_min);
   }
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextFont(7);
+  tft.setTextDatum(middle_center);
+  tft.setFont(&fonts::Font7);
+  tft.setTextSize(2);
   tft.setTextColor(CLR_TEXT, bg);
-  tft.drawString(timeBuf, 120, 100);
-
+  tft.drawString(timeBuf, SCREEN_W / 2, 200);
   // AM/PM indicator for 12h mode
   if (!netSettings.use24h) {
-    tft.setTextFont(4);
+    tft.setFont(FONT_LARGE);
+    tft.setTextSize(1);
     tft.setTextColor(CLR_TEXT_DIM, bg);
-    tft.drawString(now.tm_hour < 12 ? "AM" : "PM", 120, 135);
+    tft.drawString(now.tm_hour < 12 ? "AM" : "PM", SCREEN_W / 2, 280);
   }
 
-  // Date — smaller font below
+  // Date
   const char* days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
   char dateBuf[20];
   snprintf(dateBuf, sizeof(dateBuf), "%s  %02d.%02d.%04d",
            days[now.tm_wday], now.tm_mday, now.tm_mon + 1, now.tm_year + 1900);
-  tft.setTextFont(4);
+  tft.setFont(FONT_BODY);
+  tft.setTextSize(1);
   tft.setTextColor(CLR_TEXT_DIM, bg);
-  tft.drawString(dateBuf, 120, 155);
+  tft.drawString(dateBuf, SCREEN_W / 2, 330);
 }

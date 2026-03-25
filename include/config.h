@@ -4,17 +4,16 @@
 // =============================================================================
 //  Firmware version
 // =============================================================================
-#define FW_VERSION          "v2.3"
+#define FW_VERSION          "v2.3-ws43"
 
 // =============================================================================
-//  Display
+//  Display (Waveshare ESP32-S3-Touch-LCD-4.3: 800x480 RGB)
 // =============================================================================
-#define SCREEN_W        240
-#define SCREEN_H        240
-#define BACKLIGHT_PIN   TFT_BL  // GPIO 13
-#define BACKLIGHT_CH    0
-#define BACKLIGHT_FREQ  5000
-#define BACKLIGHT_RES   8
+#define SCREEN_W        800
+#define SCREEN_H        480
+
+// Backlight is controlled via CH422G IO expander (on/off only, no PWM)
+// See lgfx_waveshare.h for pin definitions
 
 // =============================================================================
 //  Color palette (RGB565)
@@ -79,9 +78,11 @@
 #define ROTATE_MAX_MS         600000  // max allowed interval (10 min)
 
 // =============================================================================
-//  Physical button
+//  Touch input (GT911 capacitive touch via LovyanGFX)
 // =============================================================================
-#define BUTTON_DEFAULT_PIN    4       // default GPIO for physical button
+// Touch is handled by LovyanGFX GT911 driver, no separate GPIO needed
+// Button compatibility: touch tap acts as button press
+#define BUTTON_DEFAULT_PIN    0       // not used for touch — kept for settings compat
 
 // =============================================================================
 //  Display refresh
@@ -92,5 +93,47 @@
 //  Buzzer (optional passive buzzer)
 // =============================================================================
 #define BUZZER_DEFAULT_PIN    5       // default GPIO for buzzer
+
+// =============================================================================
+//  Layout constants for 800x480 display
+// =============================================================================
+
+// Gauge sizes
+#define GAUGE_RADIUS_LARGE   58     // main gauges on printing screen
+#define GAUGE_RADIUS_SMALL   50     // idle/finish screen gauges
+#define GAUGE_THICKNESS      10     // arc thickness
+
+// Printing screen 2x3 gauge grid
+#define GAUGE_COL1_X    133         // left column center
+#define GAUGE_COL2_X    400         // middle column center
+#define GAUGE_COL3_X    667         // right column center
+#define GAUGE_ROW1_Y    140         // row 1 center (progress, nozzle, bed)
+#define GAUGE_ROW2_Y    305         // row 2 center (part fan, aux fan, chamber fan)
+
+// Header bar
+#define HEADER_Y        14          // header bar top
+#define HEADER_H        40          // header bar height
+
+// LED progress bar
+#define LED_BAR_H       8           // progress bar height
+
+// Info/ETA line
+#define INFO_LINE_Y     420         // ETA / pause / error text
+
+// Bottom status bar
+#define BOTTOM_BAR_Y    450         // filament / layer / speed
+
+// =============================================================================
+//  Font aliases (LovyanGFX FreeFont — smooth anti-aliased rendering)
+//  These replace bitmap Font0-Font7 which look pixelated when scaled.
+// =============================================================================
+#define FONT_TITLE      &fonts::FreeSansBold24pt7b   // splash title, big labels
+#define FONT_LARGE      &fonts::FreeSansBold18pt7b   // gauge main values, PAUSED/ERROR
+#define FONT_MEDIUM     &fonts::FreeSans18pt7b       // header text, status
+#define FONT_BODY       &fonts::FreeSans12pt7b       // body text, ETA, sub-values
+#define FONT_SMALL      &fonts::FreeSans12pt7b       // labels, bottom bar, wifi
+#define FONT_GAUGE_VAL  &fonts::FreeSansBold18pt7b   // gauge center value (temp/%)
+#define FONT_GAUGE_SUB  &fonts::FreeSans12pt7b       // gauge sub-text (target temp)
+#define FONT_GAUGE_LBL  &fonts::FreeSans12pt7b       // gauge label below arc
 
 #endif // CONFIG_H

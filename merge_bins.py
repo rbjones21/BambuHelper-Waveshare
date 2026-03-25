@@ -12,7 +12,7 @@ import argparse
 import os
 import sys
 
-BUILD_DIR = '.pio/build/esp32s3'
+BUILD_DIR = '.pio/build/esp32s3-waveshare-4_3'
 BOOTLOADER = os.path.join(BUILD_DIR, 'bootloader.bin')
 PARTITIONS = os.path.join(BUILD_DIR, 'partitions.bin')
 FIRMWARE = os.path.join(BUILD_DIR, 'firmware.bin')

@@ -1,7 +1,7 @@
 #ifndef DISPLAY_UI_H
 #define DISPLAY_UI_H
 
-#include <TFT_eSPI.h>
+#include "lgfx_waveshare.h"
 
 enum ScreenState {
   SCREEN_SPLASH,
@@ -16,7 +16,7 @@ enum ScreenState {
   SCREEN_OFF
 };
 
-extern TFT_eSPI tft;
+extern LGFX_Waveshare43 tft;
 
 void initDisplay();
 void updateDisplay();
@@ -25,5 +25,9 @@ ScreenState getScreenState();
 void setBacklight(uint8_t level);
 void applyDisplaySettings();  // re-apply rotation, bg, force redraw
 void triggerDisplayTransition(); // start printer-name overlay on rotation
+
+// CH422G IO expander control
+void ch422gInit();
+void ch422gWrite(uint8_t data);
 
 #endif // DISPLAY_UI_H

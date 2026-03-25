@@ -1,41 +1,39 @@
+/*
+ * Touch-as-button input for Waveshare ESP32-S3-Touch-LCD-4.3
+ * Uses LovyanGFX GT911 touch driver — a tap anywhere acts as a button press.
+ * Replaces the physical button module from the original BambuHelper.
+ */
+
 #include "button.h"
+#include "display_ui.h"
 #include "settings.h"
 
-static bool lastRaw = false;
+static bool lastTouched = false;
 static bool stableState = false;
 static unsigned long lastChangeMs = 0;
-static const unsigned long DEBOUNCE_MS = 50;
+static const unsigned long DEBOUNCE_MS = 100;  // slightly longer for touch
 
 void initButton() {
-  if (buttonType == BTN_DISABLED || buttonPin == 0) return;
-  if (buttonType == BTN_PUSH) {
-    pinMode(buttonPin, INPUT_PULLUP);
-  } else {  // BTN_TOUCH (TTP223)
-    pinMode(buttonPin, INPUT);
-  }
-  lastRaw = false;
+  // Touch is initialized by LovyanGFX in initDisplay()
+  // Nothing extra needed here
+  lastTouched = false;
   stableState = false;
   lastChangeMs = 0;
 }
 
 bool wasButtonPressed() {
-  if (buttonType == BTN_DISABLED || buttonPin == 0) return false;
-
-  bool raw;
-  if (buttonType == BTN_PUSH) {
-    raw = (digitalRead(buttonPin) == LOW);   // active LOW with pull-up
-  } else {
-    raw = (digitalRead(buttonPin) == HIGH);  // TTP223: active HIGH
-  }
+  // Read touch state from LovyanGFX
+  lgfx::touch_point_t tp;
+  bool raw = tft.getTouch(&tp);
 
   // Debounce
-  if (raw != lastRaw) {
+  if (raw != lastTouched) {
     lastChangeMs = millis();
-    lastRaw = raw;
+    lastTouched = raw;
   }
   if ((millis() - lastChangeMs) < DEBOUNCE_MS) return false;
 
-  // Rising edge detection
+  // Rising edge detection (finger down)
   bool result = false;
   if (raw && !stableState) {
     result = true;

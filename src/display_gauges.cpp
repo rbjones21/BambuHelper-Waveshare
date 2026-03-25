@@ -5,12 +5,12 @@
 // ---------------------------------------------------------------------------
 //  H2-style LED progress bar
 // ---------------------------------------------------------------------------
-void drawLedProgressBar(TFT_eSPI& tft, int16_t y, uint8_t progress) {
+void drawLedProgressBar(LGFX_Waveshare43& tft, int16_t y, uint8_t progress) {
   uint16_t bg = dispSettings.bgColor;
   uint16_t track = dispSettings.trackColor;
 
-  const int16_t barW = 236;
-  const int16_t barH = 5;
+  const int16_t barW = SCREEN_W - 20;
+  const int16_t barH = LED_BAR_H;
   const int16_t barX = (SCREEN_W - barW) / 2;
 
   tft.fillRect(barX, y, barW, barH, bg);
@@ -22,39 +22,39 @@ void drawLedProgressBar(TFT_eSPI& tft, int16_t y, uint8_t progress) {
 
   uint16_t barColor = dispSettings.progress.arc;
 
-  tft.fillRoundRect(barX, y, fillW, barH, 2, barColor);
+  tft.fillRoundRect(barX, y, fillW, barH, 3, barColor);
 
-  uint16_t glowColor = tft.alphaBlend(160, CLR_TEXT, barColor);
+  // Glow center line
+  uint16_t glowColor = tft.color332(255, 255, 255);  // bright white approx
   tft.drawFastHLine(barX + 1, y + barH / 2, fillW - 2, glowColor);
 
-  if (fillW > 4 && progress < 100) {
-    tft.fillRect(barX + fillW - 3, y, 3, barH, glowColor);
+  if (fillW > 6 && progress < 100) {
+    tft.fillRect(barX + fillW - 4, y, 4, barH, glowColor);
   }
 
   if (fillW < barW) {
-    tft.fillRoundRect(barX + fillW, y, barW - fillW, barH, 2, track);
+    tft.fillRoundRect(barX + fillW, y, barW - fillW, barH, 3, track);
   }
 }
 
 // ---------------------------------------------------------------------------
 //  Shimmer animation for progress bar
 // ---------------------------------------------------------------------------
-static int16_t shimmerPos = -1;       // current x offset within filled area
+static int16_t shimmerPos = -1;
 static unsigned long shimmerLastMs = 0;
 static bool shimmerPaused = false;
 static unsigned long shimmerPauseStart = 0;
 
-static const int16_t SHIMMER_W = 12;       // width of highlight
-static const uint16_t SHIMMER_INTERVAL = 25;  // ms between steps (~40fps)
-static const uint16_t SHIMMER_PAUSE = 1200;   // ms pause between sweeps
-static const int16_t SHIMMER_STEP = 3;       // pixels per step
+static const int16_t SHIMMER_W = 24;
+static const uint16_t SHIMMER_INTERVAL = 25;
+static const uint16_t SHIMMER_PAUSE = 1200;
+static const int16_t SHIMMER_STEP = 5;
 
-void tickProgressShimmer(TFT_eSPI& tft, int16_t y, uint8_t progress, bool printing) {
+void tickProgressShimmer(LGFX_Waveshare43& tft, int16_t y, uint8_t progress, bool printing) {
   if (!dispSettings.animatedBar || !printing || progress == 0) return;
 
   unsigned long now = millis();
 
-  // Handle pause between sweeps
   if (shimmerPaused) {
     if (now - shimmerPauseStart < SHIMMER_PAUSE) return;
     shimmerPaused = false;
@@ -64,15 +64,15 @@ void tickProgressShimmer(TFT_eSPI& tft, int16_t y, uint8_t progress, bool printi
   if (now - shimmerLastMs < SHIMMER_INTERVAL) return;
   shimmerLastMs = now;
 
-  const int16_t barW = 236;
-  const int16_t barH = 5;
+  const int16_t barW = SCREEN_W - 20;
+  const int16_t barH = LED_BAR_H;
   const int16_t barX = (SCREEN_W - barW) / 2;
   int16_t fillW = (progress * barW) / 100;
-  if (fillW < SHIMMER_W + 4) return;  // too small for shimmer
+  if (fillW < SHIMMER_W + 6) return;
 
   uint16_t barColor = dispSettings.progress.arc;
 
-  // Erase previous shimmer position (redraw base bar segment)
+  // Erase previous shimmer position
   if (shimmerPos > 0) {
     int16_t eraseX = barX + shimmerPos - SHIMMER_STEP;
     int16_t eraseW = SHIMMER_STEP;
@@ -87,14 +87,12 @@ void tickProgressShimmer(TFT_eSPI& tft, int16_t y, uint8_t progress, bool printi
   int16_t sw = SHIMMER_W;
   if (sx + sw > barX + fillW) sw = barX + fillW - sx;
   if (sw > 0) {
-    // Gradient-like shimmer: brighter in center
-    uint16_t bright = tft.alphaBlend(180, CLR_TEXT, barColor);
-    uint16_t mid    = tft.alphaBlend(100, CLR_TEXT, barColor);
-    // Edge pixels
-    if (sw >= 3) {
-      tft.fillRect(sx, y, 2, barH, mid);
-      tft.fillRect(sx + 2, y, sw - 4 > 0 ? sw - 4 : 1, barH, bright);
-      if (sw > 4) tft.fillRect(sx + sw - 2, y, 2, barH, mid);
+    uint16_t bright = CLR_TEXT;
+    uint16_t mid = CLR_TEXT_DIM;
+    if (sw >= 4) {
+      tft.fillRect(sx, y, 3, barH, mid);
+      tft.fillRect(sx + 3, y, sw - 6 > 0 ? sw - 6 : 1, barH, bright);
+      if (sw > 6) tft.fillRect(sx + sw - 3, y, 3, barH, mid);
     } else {
       tft.fillRect(sx, y, sw, barH, bright);
     }
@@ -102,14 +100,11 @@ void tickProgressShimmer(TFT_eSPI& tft, int16_t y, uint8_t progress, bool printi
 
   shimmerPos += SHIMMER_STEP;
 
-  // Reached end of filled area — restore last segment and pause
   if (shimmerPos >= fillW) {
-    // Restore the tail
     int16_t tailX = barX + fillW - SHIMMER_W - SHIMMER_STEP;
     if (tailX < barX) tailX = barX;
     tft.fillRect(tailX, y, barX + fillW - tailX, barH, barColor);
-    // Re-draw center glow line
-    uint16_t glowColor = tft.alphaBlend(160, CLR_TEXT, barColor);
+    uint16_t glowColor = CLR_TEXT;
     tft.drawFastHLine(barX + 1, y + barH / 2, fillW - 2, glowColor);
 
     shimmerPos = 0;
@@ -119,9 +114,9 @@ void tickProgressShimmer(TFT_eSPI& tft, int16_t y, uint8_t progress, bool printi
 }
 
 // ---------------------------------------------------------------------------
-//  Helper: draw arc track + fill, handling decrease properly
+//  Helper: draw arc track + fill
 // ---------------------------------------------------------------------------
-static void drawArcFill(TFT_eSPI& tft, int16_t cx, int16_t cy,
+static void drawArcFill(LGFX_Waveshare43& tft, int16_t cx, int16_t cy,
                         int16_t radius, int16_t thickness,
                         uint16_t fillEnd, uint16_t fillColor, bool forceRedraw) {
   const uint16_t startAngle = 60;
@@ -131,34 +126,32 @@ static void drawArcFill(TFT_eSPI& tft, int16_t cx, int16_t cy,
 
   if (forceRedraw) {
     tft.fillCircle(cx, cy, radius + 2, bg);
-    tft.drawSmoothArc(cx, cy, radius, radius - thickness,
-                      startAngle, endAngle, track, bg, false);
+    tft.fillArc(cx, cy, radius, radius - thickness,
+                startAngle, endAngle, track);
   }
 
-  // Draw filled portion
   if (fillEnd > startAngle) {
-    tft.drawSmoothArc(cx, cy, radius, radius - thickness,
-                      startAngle, fillEnd, fillColor, bg, false);
+    tft.fillArc(cx, cy, radius, radius - thickness,
+                startAngle, fillEnd, fillColor);
   }
 
-  // Always redraw track for unfilled portion (handles value decrease)
   if (fillEnd < endAngle) {
-    tft.drawSmoothArc(cx, cy, radius, radius - thickness,
-                      fillEnd, endAngle, track, bg, false);
+    tft.fillArc(cx, cy, radius, radius - thickness,
+                fillEnd, endAngle, track);
   }
 }
 
 // ---------------------------------------------------------------------------
-//  Helper: clear gauge center and prepare for text
+//  Helper: clear gauge center
 // ---------------------------------------------------------------------------
-static void clearGaugeCenter(TFT_eSPI& tft, int16_t cx, int16_t cy,
+static void clearGaugeCenter(LGFX_Waveshare43& tft, int16_t cx, int16_t cy,
                              int16_t radius, int16_t thickness) {
   int16_t textR = radius - thickness - 1;
   tft.fillCircle(cx, cy, textR, dispSettings.bgColor);
 }
 
 // ---------------------------------------------------------------------------
-//  Text cache — only clear+redraw gauge text when displayed string changes
+//  Text cache
 // ---------------------------------------------------------------------------
 #define GAUGE_CACHE_SLOTS 12
 
@@ -171,7 +164,6 @@ struct GaugeTextCache {
 static GaugeTextCache gCache[GAUGE_CACHE_SLOTS];
 static uint8_t gCacheCount = 0;
 
-// Find or create cache slot for gauge at (cx, cy)
 static GaugeTextCache* gaugeCache(int16_t cx, int16_t cy) {
   for (uint8_t i = 0; i < gCacheCount; i++) {
     if (gCache[i].cx == cx && gCache[i].cy == cy) return &gCache[i];
@@ -185,7 +177,6 @@ static GaugeTextCache* gaugeCache(int16_t cx, int16_t cy) {
   return nullptr;
 }
 
-// Check if text changed; update cache. Returns true if redraw needed.
 static bool gaugeTextChanged(int16_t cx, int16_t cy, const char* main,
                              const char* sub, bool force) {
   if (force) {
@@ -210,7 +201,7 @@ void resetGaugeTextCache() {
 // ---------------------------------------------------------------------------
 //  Main progress arc
 // ---------------------------------------------------------------------------
-void drawProgressArc(TFT_eSPI& tft, int16_t cx, int16_t cy, int16_t radius,
+void drawProgressArc(LGFX_Waveshare43& tft, int16_t cx, int16_t cy, int16_t radius,
                      int16_t thickness, uint8_t progress, uint8_t prevProgress,
                      uint16_t remainingMin, bool forceRedraw) {
   const uint16_t startAngle = 60;
@@ -222,15 +213,8 @@ void drawProgressArc(TFT_eSPI& tft, int16_t cx, int16_t cy, int16_t radius,
 
   drawArcFill(tft, cx, cy, radius, thickness, fillEnd, gc.arc, forceRedraw);
 
-  bool compact = (radius < 50);
-
-  // Build display strings
   char pctBuf[8];
-  if (compact) {
-    snprintf(pctBuf, sizeof(pctBuf), "%d", progress);
-  } else {
-    snprintf(pctBuf, sizeof(pctBuf), "%d%%", progress);
-  }
+  snprintf(pctBuf, sizeof(pctBuf), "%d%%", progress);
   char timeBuf[16];
   if (remainingMin >= 60) {
     snprintf(timeBuf, sizeof(timeBuf), "%dh%dm", remainingMin / 60, remainingMin % 60);
@@ -238,46 +222,41 @@ void drawProgressArc(TFT_eSPI& tft, int16_t cx, int16_t cy, int16_t radius,
     snprintf(timeBuf, sizeof(timeBuf), "%dm", remainingMin);
   }
 
-  // Only clear center + redraw text when displayed string actually changes
   if (gaugeTextChanged(cx, cy, pctBuf, timeBuf, forceRedraw)) {
     clearGaugeCenter(tft, cx, cy, radius, thickness);
 
-    tft.setTextDatum(MC_DATUM);
+    tft.setTextSize(1);
+    tft.setTextDatum(middle_center);
     tft.setTextColor(gc.value);
-    tft.setTextFont(compact ? 4 : 6);
-    tft.drawString(pctBuf, cx, cy - (compact ? 4 : 8));
+    tft.setFont(FONT_GAUGE_VAL);
+    tft.drawString(pctBuf, cx, cy - 12);
 
-    tft.setTextFont(compact ? 1 : 2);
+    tft.setFont(FONT_GAUGE_SUB);
     tft.setTextColor(CLR_TEXT_DIM);
-    tft.drawString(timeBuf, cx, cy + (compact ? 10 : 18));
+    tft.drawString(timeBuf, cx, cy + 24);
 
-    if (compact) {
-      bool sm = dispSettings.smallLabels;
-      tft.setTextFont(sm ? 1 : 2);
-      tft.setTextColor(gc.label, bg);
-      tft.drawString("Progress", cx, cy + radius + (sm ? 3 : -1));
-    }
+    tft.setFont(FONT_GAUGE_LBL);
+    tft.setTextColor(gc.label, bg);
+    tft.drawString("Progress", cx, cy + radius + 16);
   }
 }
 
 // ---------------------------------------------------------------------------
 //  Temperature arc gauge
 // ---------------------------------------------------------------------------
-void drawTempGauge(TFT_eSPI& tft, int16_t cx, int16_t cy, int16_t radius,
+void drawTempGauge(LGFX_Waveshare43& tft, int16_t cx, int16_t cy, int16_t radius,
                    float current, float target, float maxTemp,
                    uint16_t accentColor, const char* label,
                    const uint8_t* icon, bool forceRedraw,
                    const GaugeColors* colors, float arcValue) {
   const uint16_t startAngle = 60;
-  const int16_t thickness = 6;
+  const int16_t thickness = GAUGE_THICKNESS;
   uint16_t bg = dispSettings.bgColor;
 
-  // Use custom colors if provided, otherwise fall back to accentColor
   uint16_t arcColor = colors ? colors->arc : accentColor;
   uint16_t lblColor = colors ? colors->label : accentColor;
   uint16_t valColor = colors ? colors->value : CLR_TEXT;
 
-  // Arc uses smooth value if provided, text always uses actual current
   float arcVal = (arcValue >= 0.0f) ? arcValue : current;
   float ratio = (maxTemp > 0) ? (arcVal / maxTemp) : 0;
   if (ratio > 1.0f) ratio = 1.0f;
@@ -287,53 +266,48 @@ void drawTempGauge(TFT_eSPI& tft, int16_t cx, int16_t cy, int16_t radius,
   if (fillEnd <= startAngle && ratio > 0.01f) fillEnd = startAngle + 1;
   if (fillEnd > 300) fillEnd = 300;
 
-  // Use custom arc color for all fill levels
   uint16_t tempColor = arcColor;
-
   uint16_t drawFill = (ratio > 0.01f) ? fillEnd : startAngle;
   drawArcFill(tft, cx, cy, radius, thickness, drawFill, tempColor, forceRedraw);
 
-  // Build display strings
   char tempBuf[12], targetBuf[12];
   snprintf(tempBuf, sizeof(tempBuf), "%.0f", current);
   snprintf(targetBuf, sizeof(targetBuf), "/%.0f", target);
 
-  // Only clear center + redraw text when displayed string actually changes
   if (gaugeTextChanged(cx, cy, tempBuf, targetBuf, forceRedraw)) {
     clearGaugeCenter(tft, cx, cy, radius, thickness);
 
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextFont(4);
+    tft.setTextSize(1);
+    tft.setTextDatum(middle_center);
+    tft.setFont(FONT_GAUGE_VAL);
     tft.setTextColor(valColor);
-    tft.drawString(tempBuf, cx, cy - 4);
+    tft.drawString(tempBuf, cx, cy - 8);
 
-    tft.setTextFont(1);
+    tft.setFont(FONT_GAUGE_SUB);
     tft.setTextColor(CLR_TEXT_DIM);
-    tft.drawString(targetBuf, cx, cy + 10);
+    tft.drawString(targetBuf, cx, cy + 20);
 
-    bool sm = dispSettings.smallLabels;
-    tft.setTextFont(sm ? 1 : 2);
+    tft.setFont(FONT_GAUGE_LBL);
     tft.setTextColor(lblColor, bg);
-    tft.drawString(label, cx, cy + radius + (sm ? 3 : -1));
+    tft.drawString(label, cx, cy + radius + 16);
   }
 }
 
 // ---------------------------------------------------------------------------
 //  Fan speed gauge (0-100%)
 // ---------------------------------------------------------------------------
-void drawFanGauge(TFT_eSPI& tft, int16_t cx, int16_t cy, int16_t radius,
+void drawFanGauge(LGFX_Waveshare43& tft, int16_t cx, int16_t cy, int16_t radius,
                   uint8_t percent, uint16_t accentColor, const char* label,
                   bool forceRedraw, const GaugeColors* colors,
                   float arcPercent) {
   const uint16_t startAngle = 60;
-  const int16_t thickness = 6;
+  const int16_t thickness = GAUGE_THICKNESS;
   uint16_t bg = dispSettings.bgColor;
 
   uint16_t arcColor = colors ? colors->arc : accentColor;
   uint16_t lblColor = colors ? colors->label : accentColor;
   uint16_t valColor = colors ? colors->value : CLR_TEXT;
 
-  // Arc uses smooth value if provided, text always uses actual percent
   float arcVal = (arcPercent >= 0.0f) ? arcPercent : (float)percent;
   uint16_t fillEnd = startAngle + (uint16_t)(arcVal * 240.0f / 100.0f);
   if (fillEnd > 300) fillEnd = 300;
@@ -348,22 +322,20 @@ void drawFanGauge(TFT_eSPI& tft, int16_t cx, int16_t cy, int16_t radius,
   uint16_t drawFill = (arcVal > 0.5f) ? fillEnd : startAngle;
   drawArcFill(tft, cx, cy, radius, thickness, drawFill, fanColor, forceRedraw);
 
-  // Build display string
   char buf[8];
-  snprintf(buf, sizeof(buf), "%d", percent);
+  snprintf(buf, sizeof(buf), "%d%%", percent);
 
-  // Only clear center + redraw text when displayed value actually changes
   if (gaugeTextChanged(cx, cy, buf, "", forceRedraw)) {
     clearGaugeCenter(tft, cx, cy, radius, thickness);
 
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextFont(4);
+    tft.setTextSize(1);
+    tft.setTextDatum(middle_center);
+    tft.setFont(FONT_GAUGE_VAL);
     tft.setTextColor(valColor);
     tft.drawString(buf, cx, cy);
 
-    bool sm = dispSettings.smallLabels;
-    tft.setTextFont(sm ? 1 : 2);
+    tft.setFont(FONT_GAUGE_LBL);
     tft.setTextColor(lblColor, bg);
-    tft.drawString(label, cx, cy + radius + (sm ? 3 : -1));
+    tft.drawString(label, cx, cy + radius + 16);
   }
 }

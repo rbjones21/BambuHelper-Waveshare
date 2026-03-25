@@ -9,9 +9,10 @@
 #include "bambu_mqtt.h"
 #include "settings.h"
 #include <WiFi.h>
+#include <Wire.h>
 #include <time.h>
 
-TFT_eSPI tft = TFT_eSPI();
+LGFX_Waveshare43 tft;
 
 // Use user-configured bg color instead of hardcoded CLR_BG
 #undef  CLR_BG
@@ -36,8 +37,8 @@ static float smoothAuxFan     = 0;
 static float smoothChamberFan = 0;
 static bool  smoothInited     = false;
 
-static const float SMOOTH_ALPHA = 0.25f;  // per frame at 4Hz — ~1s to settle
-static const float SNAP_THRESH  = 0.5f;   // snap when within 0.5 of target
+static const float SMOOTH_ALPHA = 0.25f;
+static const float SNAP_THRESH  = 0.5f;
 
 static void smoothLerp(float& cur, float target) {
   float diff = target - cur;
@@ -45,7 +46,6 @@ static void smoothLerp(float& cur, float target) {
   else cur += diff * SMOOTH_ALPHA;
 }
 
-// Returns true if any gauge is still animating
 static bool tickGaugeSmooth(const BambuState& s, bool snap) {
   if (snap || !smoothInited) {
     smoothNozzleTemp = s.nozzleTemp;
@@ -71,58 +71,83 @@ static bool tickGaugeSmooth(const BambuState& s, bool snap) {
 }
 
 // ---------------------------------------------------------------------------
-//  Backlight
+//  CH422G IO Expander (backlight, LCD reset, touch reset)
+// ---------------------------------------------------------------------------
+static uint8_t ch422gState = 0;
+
+void ch422gInit() {
+  Wire.begin(GPIO_NUM_8, GPIO_NUM_9, 400000);
+  // Set all outputs: backlight ON, resets de-asserted (high)
+  ch422gState = CH422G_LCD_BL | CH422G_LCD_RST | CH422G_TP_RST;
+  ch422gWrite(ch422gState);
+}
+
+void ch422gWrite(uint8_t data) {
+  ch422gState = data;
+  Wire.beginTransmission(CH422G_WRITE_ADDR >> 1);
+  Wire.write(data);
+  Wire.endTransmission();
+}
+
+// ---------------------------------------------------------------------------
+//  Backlight (on/off via CH422G — no PWM on this board)
 // ---------------------------------------------------------------------------
 void setBacklight(uint8_t level) {
-#if defined(BACKLIGHT_PIN) && BACKLIGHT_PIN >= 0
-  analogWrite(BACKLIGHT_PIN, level);
-#endif
+  if (level > 0) {
+    ch422gState |= CH422G_LCD_BL;
+  } else {
+    ch422gState &= ~CH422G_LCD_BL;
+  }
+  ch422gWrite(ch422gState);
 }
 
 // ---------------------------------------------------------------------------
 //  Init
 // ---------------------------------------------------------------------------
 void initDisplay() {
-  Serial.println("Display: pre-init delay...");
-  delay(500);
+  Serial.println("Display: CH422G init...");
+  ch422gInit();
+
+  // Reset LCD and touch via IO expander
+  ch422gState &= ~(CH422G_LCD_RST | CH422G_TP_RST);
+  ch422gWrite(ch422gState);
+  delay(20);
+  ch422gState |= CH422G_LCD_RST | CH422G_TP_RST;
+  ch422gWrite(ch422gState);
+  delay(100);
+
   Serial.println("Display: calling tft.init()...");
-  Serial.flush();
-  tft.init();  // TFT_eSPI configures SPI from build flags
+  tft.init();
   Serial.println("Display: tft.init() done");
-  tft.setRotation(dispSettings.rotation);
-  Serial.println("Display: setRotation done");
+  tft.setRotation(0);  // landscape
   tft.fillScreen(CLR_BG);
   Serial.println("Display: fillScreen done");
 
-#if defined(BACKLIGHT_PIN) && BACKLIGHT_PIN >= 0
-  pinMode(BACKLIGHT_PIN, OUTPUT);
-  setBacklight(200);
-#endif
+  setBacklight(200);  // just turns on
 
   memset(&prevState, 0, sizeof(prevState));
 
   // Splash screen
-  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(1);
+  tft.setTextDatum(middle_center);
   tft.setTextColor(CLR_GREEN, CLR_BG);
-  tft.setTextFont(4);
-  tft.drawString("BambuHelper", SCREEN_W / 2, SCREEN_H / 2 - 20);
-  tft.setTextFont(2);
+  tft.setFont(FONT_TITLE);
+  tft.drawString("BambuHelper", SCREEN_W / 2, SCREEN_H / 2 - 60);
+  tft.setFont(FONT_MEDIUM);
   tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
-  tft.drawString("Printer Monitor", SCREEN_W / 2, SCREEN_H / 2 + 10);
-  tft.setTextFont(1);
-  tft.drawString(FW_VERSION, SCREEN_W / 2, SCREEN_H / 2 + 30);
+  tft.drawString("Printer Monitor", SCREEN_W / 2, SCREEN_H / 2 + 20);
+  tft.setFont(FONT_BODY);
+  tft.drawString(FW_VERSION, SCREEN_W / 2, SCREEN_H / 2 + 70);
 }
 
 void applyDisplaySettings() {
-  tft.setRotation(dispSettings.rotation);
   tft.fillScreen(dispSettings.bgColor);
   forceRedraw = true;
 }
 
 void triggerDisplayTransition() {
-  // Clear previous state so everything redraws for the new printer
   memset(&prevState, 0, sizeof(prevState));
-  smoothInited = false;  // snap gauges to new printer's values
+  smoothInited = false;
   resetGaugeTextCache();
   tft.fillScreen(dispSettings.bgColor);
   forceRedraw = true;
@@ -150,9 +175,9 @@ static const char* nozzleLabel(const BambuState& s) {
 static const char* speedLevelName(uint8_t level) {
   switch (level) {
     case 1: return "Silent";
-    case 2: return "Std";
+    case 2: return "Standard";
     case 3: return "Sport";
-    case 4: return "Ludicr";
+    case 4: return "Ludicrous";
     default: return "---";
   }
 }
@@ -171,59 +196,54 @@ static uint16_t speedLevelColor(uint8_t level) {
 //  Screen: AP Mode
 // ---------------------------------------------------------------------------
 static void drawAPMode() {
-  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(1);
+  tft.setTextDatum(middle_center);
 
-  // Title
   tft.setTextColor(CLR_GREEN, CLR_BG);
-  tft.setTextFont(4);
-  tft.drawString("WiFi Setup", SCREEN_W / 2, 40);
+  tft.setFont(FONT_TITLE);
+  tft.drawString("WiFi Setup", SCREEN_W / 2, 80);
 
-  // Instructions
-  tft.setTextFont(2);
+  tft.setFont(FONT_BODY);
   tft.setTextColor(CLR_TEXT, CLR_BG);
-  tft.drawString("Connect to WiFi:", SCREEN_W / 2, 80);
+  tft.drawString("Connect to WiFi:", SCREEN_W / 2, 150);
 
-  // AP SSID
   tft.setTextColor(CLR_CYAN, CLR_BG);
-  tft.setTextFont(4);
+  tft.setFont(FONT_LARGE);
   char ssid[32];
   uint32_t mac = (uint32_t)(ESP.getEfuseMac() & 0xFFFF);
   snprintf(ssid, sizeof(ssid), "%s%04X", WIFI_AP_PREFIX, mac);
-  tft.drawString(ssid, SCREEN_W / 2, 110);
+  tft.drawString(ssid, SCREEN_W / 2, 210);
 
-  // Password
-  tft.setTextFont(2);
+  tft.setFont(FONT_BODY);
   tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
-  tft.drawString("Password:", SCREEN_W / 2, 140);
+  tft.drawString("Password:", SCREEN_W / 2, 270);
   tft.setTextColor(CLR_TEXT, CLR_BG);
-  tft.drawString(WIFI_AP_PASSWORD, SCREEN_W / 2, 158);
+  tft.drawString(WIFI_AP_PASSWORD, SCREEN_W / 2, 300);
 
-  // IP
   tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
-  tft.drawString("Then open:", SCREEN_W / 2, 185);
+  tft.drawString("Then open:", SCREEN_W / 2, 350);
   tft.setTextColor(CLR_ORANGE, CLR_BG);
-  tft.setTextFont(4);
-  tft.drawString("192.168.4.1", SCREEN_W / 2, 210);
+  tft.setFont(FONT_LARGE);
+  tft.drawString("192.168.4.1", SCREEN_W / 2, 400);
 }
 
 // ---------------------------------------------------------------------------
 //  Screen: Connecting WiFi
 // ---------------------------------------------------------------------------
 static void drawConnectingWiFi() {
-  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(1);
+  tft.setTextDatum(middle_center);
 
-  // Title
-  tft.setTextFont(2);
+  tft.setFont(FONT_MEDIUM);
   tft.setTextColor(CLR_TEXT, CLR_BG);
-  tft.drawString("Connecting to WiFi", SCREEN_W / 2, SCREEN_H / 2 - 20);
+  tft.drawString("Connecting to WiFi", SCREEN_W / 2, SCREEN_H / 2 - 40);
 
   int16_t tw = tft.textWidth("Connecting to WiFi");
-  drawAnimDots(tft, SCREEN_W / 2 + tw / 2, SCREEN_H / 2 - 26, CLR_TEXT);
+  drawAnimDots(tft, SCREEN_W / 2 + tw / 2, SCREEN_H / 2 - 50, CLR_TEXT);
 
-  // Slide bar
-  const int16_t barW = 180;
-  const int16_t barH = 8;
-  drawSlideBar(tft, (SCREEN_W - barW) / 2, SCREEN_H / 2 + 4,
+  const int16_t barW = 400;
+  const int16_t barH = 12;
+  drawSlideBar(tft, (SCREEN_W - barW) / 2, SCREEN_H / 2,
                barW, barH, CLR_BLUE, CLR_TRACK);
 }
 
@@ -233,52 +253,49 @@ static void drawConnectingWiFi() {
 static void drawWiFiConnected() {
   if (!forceRedraw) return;
 
-  tft.setTextDatum(MC_DATUM);
+  tft.setTextDatum(middle_center);
 
-  // Checkmark circle with tick
   int cx = SCREEN_W / 2;
-  int cy = SCREEN_H / 2 - 40;
-  tft.fillCircle(cx, cy, 25, CLR_GREEN);
-  // Draw thick tick mark (3px wide)
-  for (int i = -1; i <= 1; i++) {
-    tft.drawLine(cx - 12, cy + i,     cx - 4, cy + 8 + i, CLR_BG);  // short leg
-    tft.drawLine(cx - 4,  cy + 8 + i, cx + 12, cy - 6 + i, CLR_BG); // long leg
+  int cy = SCREEN_H / 2 - 60;
+  tft.fillCircle(cx, cy, 40, CLR_GREEN);
+  for (int i = -2; i <= 2; i++) {
+    tft.drawLine(cx - 18, cy + i,     cx - 6, cy + 14 + i, CLR_BG);
+    tft.drawLine(cx - 6,  cy + 14 + i, cx + 18, cy - 10 + i, CLR_BG);
   }
 
+  tft.setTextSize(1);
   tft.setTextColor(CLR_GREEN, CLR_BG);
-  tft.setTextFont(4);
-  tft.drawString("WiFi Connected", SCREEN_W / 2, SCREEN_H / 2 + 10);
+  tft.setFont(FONT_LARGE);
+  tft.drawString("WiFi Connected", SCREEN_W / 2, SCREEN_H / 2 + 20);
 
   tft.setTextColor(CLR_TEXT, CLR_BG);
-  tft.setTextFont(2);
-  tft.drawString(WiFi.localIP().toString().c_str(), SCREEN_W / 2, SCREEN_H / 2 + 40);
+  tft.setFont(FONT_BODY);
+  tft.drawString(WiFi.localIP().toString().c_str(), SCREEN_W / 2, SCREEN_H / 2 + 70);
 }
 
 // ---------------------------------------------------------------------------
 //  Screen: Connecting MQTT
 // ---------------------------------------------------------------------------
 static void drawConnectingMQTT() {
-  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(1);
+  tft.setTextDatum(middle_center);
 
-  // Title
-  tft.setTextFont(2);
+  tft.setFont(FONT_MEDIUM);
   tft.setTextColor(CLR_TEXT, CLR_BG);
-  tft.drawString("Connecting to Printer", SCREEN_W / 2, SCREEN_H / 2 - 40);
+  tft.drawString("Connecting to Printer", SCREEN_W / 2, SCREEN_H / 2 - 60);
 
   int16_t tw = tft.textWidth("Connecting to Printer");
-  drawAnimDots(tft, SCREEN_W / 2 + tw / 2, SCREEN_H / 2 - 46, CLR_TEXT);
-  tft.setTextDatum(MC_DATUM);
+  drawAnimDots(tft, SCREEN_W / 2 + tw / 2, SCREEN_H / 2 - 70, CLR_TEXT);
+  tft.setTextDatum(middle_center);
 
-  // Slide bar
-  const int16_t barW = 180;
-  const int16_t barH = 8;
-  drawSlideBar(tft, (SCREEN_W - barW) / 2, SCREEN_H / 2 - 14,
+  const int16_t barW = 400;
+  const int16_t barH = 12;
+  drawSlideBar(tft, (SCREEN_W - barW) / 2, SCREEN_H / 2 - 20,
                barW, barH, CLR_ORANGE, CLR_TRACK);
 
-  // Connection mode + printer info
   PrinterSlot& p = displayedPrinter();
   tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
-  tft.setTextFont(2);
+  tft.setFont(FONT_BODY);
 
   const char* modeStr = isCloudMode(p.config.mode) ? "Cloud" : "LAN";
   char infoBuf[40];
@@ -289,32 +306,30 @@ static void drawConnectingMQTT() {
     snprintf(infoBuf, sizeof(infoBuf), "[%s] %s",  modeStr,
              strlen(p.config.ip) > 0 ? p.config.ip : "no IP!");
   }
-  tft.drawString(infoBuf, SCREEN_W / 2, SCREEN_H / 2 + 10);
+  tft.drawString(infoBuf, SCREEN_W / 2, SCREEN_H / 2 + 20);
 
-  // Elapsed time
   if (connectScreenStart > 0) {
     unsigned long elapsed = (millis() - connectScreenStart) / 1000;
     char elBuf[16];
     snprintf(elBuf, sizeof(elBuf), "%lus", elapsed);
-    tft.fillRect(SCREEN_W / 2 - 30, SCREEN_H / 2 + 22, 60, 16, CLR_BG);
-    tft.drawString(elBuf, SCREEN_W / 2, SCREEN_H / 2 + 30);
+    tft.fillRect(SCREEN_W / 2 - 50, SCREEN_H / 2 + 40, 100, 24, CLR_BG);
+    tft.drawString(elBuf, SCREEN_W / 2, SCREEN_H / 2 + 50);
   }
 
-  // Diagnostics (only after first attempt)
   const MqttDiag& d = getMqttDiag(rotState.displayIndex);
   if (d.attempts > 0) {
-    tft.setTextFont(1);
-    tft.setTextDatum(MC_DATUM);
+    tft.setFont(FONT_SMALL);
+    tft.setTextDatum(middle_center);
 
     char buf[40];
     snprintf(buf, sizeof(buf), "Attempt: %u", d.attempts);
     tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
-    tft.drawString(buf, SCREEN_W / 2, SCREEN_H / 2 + 50);
+    tft.drawString(buf, SCREEN_W / 2, SCREEN_H / 2 + 80);
 
     if (d.lastRc != 0) {
       snprintf(buf, sizeof(buf), "Err: %s", mqttRcToString(d.lastRc));
       tft.setTextColor(CLR_RED, CLR_BG);
-      tft.drawString(buf, SCREEN_W / 2, SCREEN_H / 2 + 62);
+      tft.drawString(buf, SCREEN_W / 2, SCREEN_H / 2 + 110);
     }
   }
 }
@@ -325,26 +340,27 @@ static void drawConnectingMQTT() {
 static void drawIdleNoPrinter() {
   if (!forceRedraw) return;
 
-  tft.setTextDatum(MC_DATUM);
+  tft.setTextDatum(middle_center);
 
+  tft.setTextSize(1);
   tft.setTextColor(CLR_GREEN, CLR_BG);
-  tft.setTextFont(4);
-  tft.drawString("BambuHelper", SCREEN_W / 2, 40);
+  tft.setFont(FONT_TITLE);
+  tft.drawString("BambuHelper", SCREEN_W / 2, 80);
 
   tft.setTextColor(CLR_TEXT, CLR_BG);
-  tft.setTextFont(2);
-  tft.drawString("WiFi Connected", SCREEN_W / 2, 80);
+  tft.setFont(FONT_BODY);
+  tft.drawString("WiFi Connected", SCREEN_W / 2, 160);
 
-  tft.fillCircle(SCREEN_W / 2, 105, 5, CLR_GREEN);
+  tft.fillCircle(SCREEN_W / 2, 200, 8, CLR_GREEN);
 
   tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
-  tft.setTextFont(2);
-  tft.drawString("No printer configured", SCREEN_W / 2, 140);
-  tft.drawString("Open in browser:", SCREEN_W / 2, 165);
+  tft.setFont(FONT_BODY);
+  tft.drawString("No printer configured", SCREEN_W / 2, 260);
+  tft.drawString("Open in browser:", SCREEN_W / 2, 310);
 
   tft.setTextColor(CLR_ORANGE, CLR_BG);
-  tft.setTextFont(4);
-  tft.drawString(WiFi.localIP().toString().c_str(), SCREEN_W / 2, 200);
+  tft.setFont(FONT_LARGE);
+  tft.drawString(WiFi.localIP().toString().c_str(), SCREEN_W / 2, 380);
 }
 
 static bool wasNoPrinter = false;
@@ -356,7 +372,6 @@ static void drawIdle() {
     return;
   }
 
-  // Transition from "no printer" to configured — clear stale screen
   if (wasNoPrinter) {
     wasNoPrinter = false;
     tft.fillScreen(dispSettings.bgColor);
@@ -377,49 +392,47 @@ static void drawIdle() {
   bool connChanged = forceRedraw || (s.connected != prevState.connected);
   bool wifiChanged = forceRedraw || (s.wifiSignal != prevState.wifiSignal);
 
-  tft.setTextDatum(MC_DATUM);
+  tft.setTextDatum(middle_center);
 
-  // Printer name (only on forceRedraw — name doesn't change)
+  // Printer name
   if (forceRedraw) {
+    tft.setTextSize(1);
     tft.setTextColor(CLR_GREEN, CLR_BG);
-    tft.setTextFont(4);
+    tft.setFont(FONT_LARGE);
     const char* name = (p.config.name[0] != '\0') ? p.config.name : "Bambu P1S";
-    tft.drawString(name, SCREEN_W / 2, 30);
+    tft.drawString(name, SCREEN_W / 2, 60);
   }
 
-  // Status badge — only redraw when state changes
+  // Status badge
   if (stateChanged) {
-    tft.setTextFont(2);
+    tft.setFont(FONT_BODY);
     uint16_t stateColor = CLR_TEXT_DIM;
     const char* stateStr = s.gcodeState;
     if (strcmp(s.gcodeState, "IDLE") == 0) {
-      stateColor = CLR_GREEN;
-      stateStr = "Ready";
+      stateColor = CLR_GREEN; stateStr = "Ready";
     } else if (strcmp(s.gcodeState, "FAILED") == 0) {
-      stateColor = CLR_RED;
-      stateStr = "ERROR";
+      stateColor = CLR_RED; stateStr = "ERROR";
     } else if (strcmp(s.gcodeState, "UNKNOWN") == 0 || s.gcodeState[0] == '\0') {
       stateStr = "Waiting...";
     }
-    tft.fillRect(0, 50, SCREEN_W, 20, CLR_BG);
+    tft.fillRect(0, 100, SCREEN_W, 40, CLR_BG);
     tft.setTextColor(stateColor, CLR_BG);
-    tft.drawString(stateStr, SCREEN_W / 2, 60);
+    tft.drawString(stateStr, SCREEN_W / 2, 120);
   }
 
   // Connected indicator
   if (connChanged) {
-    tft.fillCircle(SCREEN_W / 2, 85, 5, s.connected ? CLR_GREEN : CLR_RED);
+    tft.fillCircle(SCREEN_W / 2, 160, 8, s.connected ? CLR_GREEN : CLR_RED);
   }
 
-  // Nozzle temp gauge
+  // Temperature gauges (two centered)
   if (tempChanged) {
-    drawTempGauge(tft, SCREEN_W / 2 - 55, 140, 30,
+    drawTempGauge(tft, SCREEN_W / 2 - 120, 260, GAUGE_RADIUS_SMALL,
                   s.nozzleTemp, s.nozzleTarget, 300.0f,
                   dispSettings.nozzle.arc, nozzleLabel(s), nullptr, forceRedraw,
                   &dispSettings.nozzle, smoothNozzleTemp);
 
-    // Bed temp gauge
-    drawTempGauge(tft, SCREEN_W / 2 + 55, 140, 30,
+    drawTempGauge(tft, SCREEN_W / 2 + 120, 260, GAUGE_RADIUS_SMALL,
                   s.bedTemp, s.bedTarget, 120.0f,
                   dispSettings.bed.arc, "Bed", nullptr, forceRedraw,
                   &dispSettings.bed, smoothBedTemp);
@@ -428,22 +441,22 @@ static void drawIdle() {
   // Bottom: filament indicator or WiFi signal
   bool bottomChanged = wifiChanged || (s.ams.activeTray != prevState.ams.activeTray);
   if (bottomChanged) {
-    tft.fillRect(0, SCREEN_H - 18, SCREEN_W, 18, CLR_BG);
-    tft.setTextFont(2);
-    tft.setTextDatum(BC_DATUM);
+    tft.fillRect(0, SCREEN_H - 40, SCREEN_W, 40, CLR_BG);
+    tft.setFont(FONT_SMALL);
+    tft.setTextDatum(bottom_center);
 
     if (s.ams.present && s.ams.activeTray < AMS_MAX_TRAYS && s.ams.trays[s.ams.activeTray].present) {
       AmsTray& t = s.ams.trays[s.ams.activeTray];
-      int cx = SCREEN_W / 2 - tft.textWidth(t.type) / 2 - 8;
-      tft.drawCircle(cx, SCREEN_H - 8, 5, CLR_TEXT_DARK);
-      tft.fillCircle(cx, SCREEN_H - 8, 4, t.colorRgb565);
+      int cx = SCREEN_W / 2 - tft.textWidth(t.type) / 2 - 16;
+      tft.drawCircle(cx, SCREEN_H - 18, 8, CLR_TEXT_DARK);
+      tft.fillCircle(cx, SCREEN_H - 18, 7, t.colorRgb565);
       tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
-      tft.drawString(t.type, SCREEN_W / 2 + 4, SCREEN_H - 2);
+      tft.drawString(t.type, SCREEN_W / 2 + 6, SCREEN_H - 4);
     } else {
       tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
       char wifiBuf[24];
       snprintf(wifiBuf, sizeof(wifiBuf), "WiFi: %d dBm", s.wifiSignal);
-      tft.drawString(wifiBuf, SCREEN_W / 2, SCREEN_H - 2);
+      tft.drawString(wifiBuf, SCREEN_W / 2, SCREEN_H - 4);
     }
   }
 }
@@ -452,16 +465,17 @@ static void drawIdle() {
 //  Helper: draw WiFi signal indicator in bottom-left corner
 // ---------------------------------------------------------------------------
 static void drawWifiSignalIndicator(const BambuState& s) {
-  tft.setTextDatum(ML_DATUM);
+  tft.setTextDatum(middle_left);
   tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
+  tft.setFont(FONT_SMALL);
   char wifiBuf[16];
   snprintf(wifiBuf, sizeof(wifiBuf), "%ddBm", s.wifiSignal);
-  tft.drawString(wifiBuf, 4, 232);
+  tft.drawString(wifiBuf, 8, BOTTOM_BAR_Y + 10);
 }
 
 // ---------------------------------------------------------------------------
 //  Screen: Printing (main dashboard)
-//  Layout: LED bar | header | 2x3 gauge grid | info line
+//  Layout: LED bar | header | 2x3 gauge grid | info line | bottom bar
 // ---------------------------------------------------------------------------
 static void drawPrinting() {
   PrinterSlot& p = displayedPrinter();
@@ -483,31 +497,25 @@ static void drawPrinting() {
   bool stateChanged = forceRedraw ||
                       (strcmp(s.gcodeState, prevState.gcodeState) != 0);
 
-  // 2x3 gauge grid constants
-  const int16_t gR = 32;       // radius for all gauges
-  const int16_t gT = 6;        // thickness for progress arc
-  const int16_t col1 = 42;     // left column center X
-  const int16_t col2 = 120;    // middle column center X
-  const int16_t col3 = 198;    // right column center X
-  const int16_t row1Y = 60;    // row 1 center Y (progress, nozzle, bed)
-  const int16_t row2Y = 148;   // row 2 center Y (part fan, aux fan, chamb fan)
+  const int16_t gR = GAUGE_RADIUS_LARGE;
+  const int16_t gT = GAUGE_THICKNESS;
 
-  // === H2-style LED progress bar (y=0-5) ===
+  // === H2-style LED progress bar (top) ===
   if (progChanged) {
     drawLedProgressBar(tft, 0, s.progress);
   }
 
-  // === Header bar (y=7-25) ===
+  // === Header bar ===
   if (forceRedraw || stateChanged) {
     uint16_t hdrBg = dispSettings.bgColor;
-    tft.fillRect(0, 7, SCREEN_W, 20, hdrBg);
+    tft.fillRect(0, HEADER_Y, SCREEN_W, HEADER_H, hdrBg);
 
     // Printer name (left)
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextFont(2);
+    tft.setTextDatum(middle_left);
+    tft.setFont(FONT_MEDIUM);
     tft.setTextColor(CLR_TEXT, hdrBg);
     const char* name = (p.config.name[0] != '\0') ? p.config.name : "Bambu P1S";
-    tft.drawString(name, 6, 17);
+    tft.drawString(name, 12, HEADER_Y + HEADER_H / 2);
 
     // State badge (right)
     uint16_t badgeColor = CLR_TEXT_DIM;
@@ -516,76 +524,70 @@ static void drawPrinting() {
     else if (strcmp(s.gcodeState, "FAILED") == 0) badgeColor = CLR_RED;
     else if (strcmp(s.gcodeState, "PREPARE") == 0) badgeColor = CLR_BLUE;
 
-    tft.setTextDatum(MR_DATUM);
+    tft.setTextDatum(middle_right);
     tft.setTextColor(badgeColor, hdrBg);
-    tft.setTextFont(2);
-    tft.fillCircle(SCREEN_W - 8 - tft.textWidth(s.gcodeState) - 10, 17, 4, badgeColor);
-    tft.drawString(s.gcodeState, SCREEN_W - 8, 17);
+    tft.setFont(FONT_MEDIUM);
+    tft.fillCircle(SCREEN_W - 12 - tft.textWidth(s.gcodeState) - 14, HEADER_Y + HEADER_H / 2, 8, badgeColor);
+    tft.drawString(s.gcodeState, SCREEN_W - 12, HEADER_Y + HEADER_H / 2);
 
     // Printer indicator dots (multi-printer)
     if (getActiveConnCount() > 1) {
       for (uint8_t di = 0; di < MAX_ACTIVE_PRINTERS; di++) {
         if (!isPrinterConfigured(di)) continue;
         uint16_t dotClr = (di == rotState.displayIndex) ? CLR_GREEN : CLR_TEXT_DARK;
-        tft.fillCircle(SCREEN_W / 2 - 5 + di * 10, 10, 3, dotClr);
+        tft.fillCircle(SCREEN_W / 2 - 8 + di * 16, HEADER_Y + 8, 5, dotClr);
       }
     }
   }
 
-  // === Row 1: Progress | Nozzle | Bed (y=30-100) ===
-
+  // === Row 1: Progress | Nozzle | Bed ===
   if (progChanged || forceRedraw) {
-    drawProgressArc(tft, col1, row1Y, gR, gT,
+    drawProgressArc(tft, GAUGE_COL1_X, GAUGE_ROW1_Y, gR, gT,
                     s.progress, prevState.progress,
                     s.remainingMinutes, forceRedraw);
   }
 
   if (tempChanged) {
-    drawTempGauge(tft, col2, row1Y, gR,
+    drawTempGauge(tft, GAUGE_COL2_X, GAUGE_ROW1_Y, gR,
                   s.nozzleTemp, s.nozzleTarget, 300.0f,
                   dispSettings.nozzle.arc, nozzleLabel(s), nullptr, forceRedraw,
                   &dispSettings.nozzle, smoothNozzleTemp);
 
-    drawTempGauge(tft, col3, row1Y, gR,
+    drawTempGauge(tft, GAUGE_COL3_X, GAUGE_ROW1_Y, gR,
                   s.bedTemp, s.bedTarget, 120.0f,
                   dispSettings.bed.arc, "Bed", nullptr, forceRedraw,
                   &dispSettings.bed, smoothBedTemp);
   }
 
-  // === Row 2: Part Fan | Aux Fan | Chamber Fan (y=106-176) ===
-
+  // === Row 2: Part Fan | Aux Fan | Chamber Fan ===
   if (fansChanged) {
-    drawFanGauge(tft, col1, row2Y, gR,
-                 s.coolingFanPct, dispSettings.partFan.arc, "Part", forceRedraw,
+    drawFanGauge(tft, GAUGE_COL1_X, GAUGE_ROW2_Y, gR,
+                 s.coolingFanPct, dispSettings.partFan.arc, "Part Fan", forceRedraw,
                  &dispSettings.partFan, smoothPartFan);
 
-    drawFanGauge(tft, col2, row2Y, gR,
-                 s.auxFanPct, dispSettings.auxFan.arc, "Aux", forceRedraw,
+    drawFanGauge(tft, GAUGE_COL2_X, GAUGE_ROW2_Y, gR,
+                 s.auxFanPct, dispSettings.auxFan.arc, "Aux Fan", forceRedraw,
                  &dispSettings.auxFan, smoothAuxFan);
 
-    drawFanGauge(tft, col3, row2Y, gR,
+    drawFanGauge(tft, GAUGE_COL3_X, GAUGE_ROW2_Y, gR,
                  s.chamberFanPct, dispSettings.chamberFan.arc, "Chamber", forceRedraw,
                  &dispSettings.chamberFan, smoothChamberFan);
   }
 
-  // === Info line — ETA finish time or PAUSE/ERROR alert (below row 2 labels) ===
+  // === Info line — ETA / PAUSE / ERROR ===
   if (etaChanged || stateChanged) {
-    tft.fillRect(0, 190, SCREEN_W, 30, CLR_BG);
-    tft.setTextDatum(MC_DATUM);
+    tft.fillRect(0, INFO_LINE_Y - 20, SCREEN_W, 40, CLR_BG);
+    tft.setTextDatum(middle_center);
 
     if (strcmp(s.gcodeState, "PAUSE") == 0) {
-      // Prominent PAUSE alert
-      tft.setTextFont(4);
+      tft.setFont(FONT_LARGE);
       tft.setTextColor(CLR_YELLOW, CLR_BG);
-      tft.drawString("PAUSED", SCREEN_W / 2, 207);
+      tft.drawString("PAUSED", SCREEN_W / 2, INFO_LINE_Y);
     } else if (strcmp(s.gcodeState, "FAILED") == 0) {
-      // Prominent ERROR alert
-      tft.setTextFont(4);
+      tft.setFont(FONT_LARGE);
       tft.setTextColor(CLR_RED, CLR_BG);
-      tft.drawString("ERROR!", SCREEN_W / 2, 207);
+      tft.drawString("ERROR!", SCREEN_W / 2, INFO_LINE_Y);
     } else if (s.remainingMinutes > 0) {
-      // Use time() directly - avoids getLocalTime() race condition with timeout 0.
-      // Once NTP syncs the RTC keeps running; ntpSynced latches true forever.
       static bool ntpSynced = false;
       time_t nowEpoch = time(nullptr);
       struct tm now;
@@ -593,7 +595,6 @@ static void drawPrinting() {
       if (now.tm_year > (2020 - 1900)) ntpSynced = true;
 
       if (ntpSynced) {
-        // Calculate ETA: current time + remaining minutes
         time_t etaEpoch = nowEpoch + (time_t)s.remainingMinutes * 60;
         struct tm etaTm;
         localtime_r(&etaEpoch, &etaTm);
@@ -606,7 +607,6 @@ static void drawPrinting() {
           etaH = etaH % 12;
           if (etaH == 0) etaH = 12;
         }
-        // Show date only if finish is not today
         if (etaTm.tm_yday != now.tm_yday || etaTm.tm_year != now.tm_year) {
           if (netSettings.use24h)
             snprintf(etaBuf, sizeof(etaBuf), "ETA: %d.%02d %02d:%02d",
@@ -620,28 +620,26 @@ static void drawPrinting() {
           else
             snprintf(etaBuf, sizeof(etaBuf), "ETA: %d:%02d %s", etaH, etaTm.tm_min, ampm);
         }
-        tft.setTextFont(4);
+        tft.setFont(FONT_BODY);
         tft.setTextColor(CLR_GREEN, CLR_BG);
-        tft.drawString(etaBuf, SCREEN_W / 2, 207);
+        tft.drawString(etaBuf, SCREEN_W / 2, INFO_LINE_Y);
       } else {
-        // NTP not synced yet - show remaining time only
         char remBuf[24];
         uint16_t h = s.remainingMinutes / 60;
         uint16_t m = s.remainingMinutes % 60;
         snprintf(remBuf, sizeof(remBuf), "Remaining: %dh %02dm", h, m);
-        tft.setTextFont(4);
+        tft.setFont(FONT_BODY);
         tft.setTextColor(CLR_TEXT, CLR_BG);
-        tft.drawString(remBuf, SCREEN_W / 2, 207);
+        tft.drawString(remBuf, SCREEN_W / 2, INFO_LINE_Y);
       }
     } else {
-      tft.setTextFont(4);
+      tft.setFont(FONT_BODY);
       tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
-      tft.drawString("ETA: ---", SCREEN_W / 2, 207);
+      tft.drawString("ETA: ---", SCREEN_W / 2, INFO_LINE_Y);
     }
   }
 
-  // === Bottom status bar — Filament/WiFi | Layer | Speed (y=222-240) ===
-  // WiFi signal only matters when AMS indicator is not shown
+  // === Bottom status bar — Filament/WiFi | Layer | Speed ===
   bool showingWifi = !(s.ams.present && s.ams.activeTray < AMS_MAX_TRAYS && s.ams.trays[s.ams.activeTray].present)
                   && !(s.ams.vtPresent && s.ams.activeTray == 254);
   bool bottomChanged = forceRedraw ||
@@ -651,47 +649,47 @@ static void drawPrinting() {
                        (s.ams.activeTray != prevState.ams.activeTray) ||
                        (showingWifi && s.wifiSignal != prevState.wifiSignal);
   if (bottomChanged) {
-    tft.fillRect(0, 222, SCREEN_W, 18, CLR_BG);
-    tft.setTextFont(2);
+    tft.fillRect(0, BOTTOM_BAR_Y, SCREEN_W, 24, CLR_BG);
+    tft.setFont(FONT_SMALL);
 
-    // Left: filament indicator (if AMS active) or WiFi signal
+    // Left: filament indicator or WiFi signal
     if (s.ams.present && s.ams.activeTray < AMS_MAX_TRAYS) {
       AmsTray& t = s.ams.trays[s.ams.activeTray];
       if (t.present) {
-        tft.drawCircle(10, 232, 5, CLR_TEXT_DARK);
-        tft.fillCircle(10, 232, 4, t.colorRgb565);
-        tft.setTextDatum(ML_DATUM);
+        tft.drawCircle(16, BOTTOM_BAR_Y + 12, 7, CLR_TEXT_DARK);
+        tft.fillCircle(16, BOTTOM_BAR_Y + 12, 6, t.colorRgb565);
+        tft.setTextDatum(middle_left);
         tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
-        tft.drawString(t.type, 19, 232);
+        tft.drawString(t.type, 28, BOTTOM_BAR_Y + 12);
       } else {
         drawWifiSignalIndicator(s);
       }
     } else if (s.ams.vtPresent && s.ams.activeTray == 254) {
-      tft.drawCircle(10, 232, 5, CLR_TEXT_DARK);
-      tft.fillCircle(10, 232, 4, s.ams.vtColorRgb565);
-      tft.setTextDatum(ML_DATUM);
+      tft.drawCircle(16, BOTTOM_BAR_Y + 12, 7, CLR_TEXT_DARK);
+      tft.fillCircle(16, BOTTOM_BAR_Y + 12, 6, s.ams.vtColorRgb565);
+      tft.setTextDatum(middle_left);
       tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
-      tft.drawString(s.ams.vtType, 19, 232);
+      tft.drawString(s.ams.vtType, 28, BOTTOM_BAR_Y + 12);
     } else {
       drawWifiSignalIndicator(s);
     }
 
     // Layer count (center)
-    tft.setTextDatum(MC_DATUM);
+    tft.setTextDatum(middle_center);
     tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
     char layerBuf[20];
     snprintf(layerBuf, sizeof(layerBuf), "L%d/%d", s.layerNum, s.totalLayers);
-    tft.drawString(layerBuf, SCREEN_W / 2, 232);
+    tft.drawString(layerBuf, SCREEN_W / 2, BOTTOM_BAR_Y + 12);
 
     // Speed mode (right)
-    tft.setTextDatum(MR_DATUM);
+    tft.setTextDatum(middle_right);
     tft.setTextColor(speedLevelColor(s.speedLevel), CLR_BG);
-    tft.drawString(speedLevelName(s.speedLevel), SCREEN_W - 4, 232);
+    tft.drawString(speedLevelName(s.speedLevel), SCREEN_W - 12, BOTTOM_BAR_Y + 12);
   }
 }
 
 // ---------------------------------------------------------------------------
-//  Screen: Finished (same layout as printing, but with 2 gauges + status)
+//  Screen: Finished
 // ---------------------------------------------------------------------------
 static void drawFinished() {
   PrinterSlot& p = displayedPrinter();
@@ -704,46 +702,43 @@ static void drawFinished() {
                      (s.bedTemp != prevState.bedTemp) ||
                      (s.bedTarget != prevState.bedTarget);
 
-  const int16_t gR = 32;
-  const int16_t gaugeLeft  = 72;   // two gauges centered on 240px
-  const int16_t gaugeRight = 168;
-  const int16_t gaugeY = 80;
+  const int16_t gR = GAUGE_RADIUS_LARGE;
+  const int16_t gaugeLeft  = SCREEN_W / 2 - 120;
+  const int16_t gaugeRight = SCREEN_W / 2 + 120;
+  const int16_t gaugeY = 160;
 
-  // === H2-style LED progress bar at 100% (y=0-5) ===
+  // === LED progress bar at 100% ===
   if (forceRedraw) {
     drawLedProgressBar(tft, 0, 100);
   }
 
-  // === Header bar (y=7-25) — same as printing screen ===
+  // === Header bar ===
   if (forceRedraw) {
     uint16_t hdrBg = dispSettings.bgColor;
-    tft.fillRect(0, 7, SCREEN_W, 20, hdrBg);
+    tft.fillRect(0, HEADER_Y, SCREEN_W, HEADER_H, hdrBg);
 
-    // Printer name (left)
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextFont(2);
+    tft.setTextDatum(middle_left);
+    tft.setFont(FONT_MEDIUM);
     tft.setTextColor(CLR_TEXT, hdrBg);
     const char* name = (p.config.name[0] != '\0') ? p.config.name : "Printer";
-    tft.drawString(name, 6, 17);
+    tft.drawString(name, 12, HEADER_Y + HEADER_H / 2);
 
-    // FINISH badge (right)
-    tft.setTextDatum(MR_DATUM);
+    tft.setTextDatum(middle_right);
     tft.setTextColor(CLR_GREEN, hdrBg);
-    tft.setTextFont(2);
-    tft.fillCircle(SCREEN_W - 8 - tft.textWidth("FINISH") - 10, 17, 4, CLR_GREEN);
-    tft.drawString("FINISH", SCREEN_W - 8, 17);
+    tft.setFont(FONT_MEDIUM);
+    tft.fillCircle(SCREEN_W - 12 - tft.textWidth("FINISH") - 14, HEADER_Y + HEADER_H / 2, 8, CLR_GREEN);
+    tft.drawString("FINISH", SCREEN_W - 12, HEADER_Y + HEADER_H / 2);
 
-    // Printer indicator dots (multi-printer)
     if (getActiveConnCount() > 1) {
       for (uint8_t di = 0; di < MAX_ACTIVE_PRINTERS; di++) {
         if (!isPrinterConfigured(di)) continue;
         uint16_t dotClr = (di == rotState.displayIndex) ? CLR_GREEN : CLR_TEXT_DARK;
-        tft.fillCircle(SCREEN_W / 2 - 5 + di * 10, 10, 3, dotClr);
+        tft.fillCircle(SCREEN_W / 2 - 8 + di * 16, HEADER_Y + 8, 5, dotClr);
       }
     }
   }
 
-  // === Row 1: Nozzle | Bed (two gauges centered) ===
+  // === Temp gauges ===
   if (tempChanged) {
     drawTempGauge(tft, gaugeLeft, gaugeY, gR,
                   s.nozzleTemp, s.nozzleTarget, 300.0f,
@@ -756,36 +751,36 @@ static void drawFinished() {
                   &dispSettings.bed, smoothBedTemp);
   }
 
-  // === "Print Complete!" status ===
+  // === "Print Complete!" ===
   if (forceRedraw) {
-    tft.setTextDatum(MC_DATUM);
+    tft.setTextDatum(middle_center);
     tft.setTextColor(CLR_GREEN, CLR_BG);
-    tft.setTextFont(4);
-    tft.drawString("Print Complete!", SCREEN_W / 2, 148);
+    tft.setFont(FONT_TITLE);
+    tft.drawString("Print Complete!", SCREEN_W / 2, 300);
   }
 
   // === File name ===
   if (forceRedraw) {
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextFont(2);
+    tft.setTextDatum(middle_center);
+    tft.setFont(FONT_BODY);
     tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
     if (s.subtaskName[0] != '\0') {
-      char truncName[26];
-      strncpy(truncName, s.subtaskName, 25);
-      truncName[25] = '\0';
-      tft.drawString(truncName, SCREEN_W / 2, 178);
+      char truncName[40];
+      strncpy(truncName, s.subtaskName, 39);
+      truncName[39] = '\0';
+      tft.drawString(truncName, SCREEN_W / 2, 350);
     }
   }
 
-  // === Bottom status bar — WiFi (y=218-236) ===
+  // === Bottom: WiFi ===
   if (forceRedraw) {
-    tft.fillRect(0, 218, SCREEN_W, 22, CLR_BG);
-    tft.setTextFont(1);
-    tft.setTextDatum(MC_DATUM);
+    tft.fillRect(0, SCREEN_H - 40, SCREEN_W, 40, CLR_BG);
+    tft.setFont(FONT_SMALL);
+    tft.setTextDatum(middle_center);
     tft.setTextColor(CLR_TEXT_DIM, CLR_BG);
     char wifiBuf[20];
     snprintf(wifiBuf, sizeof(wifiBuf), "WiFi: %d dBm", s.wifiSignal);
-    tft.drawString(wifiBuf, SCREEN_W / 2, 230);
+    tft.drawString(wifiBuf, SCREEN_W / 2, SCREEN_H - 18);
   }
 }
 
@@ -793,12 +788,12 @@ static void drawFinished() {
 //  Main update (called from loop)
 // ---------------------------------------------------------------------------
 void updateDisplay() {
-  // Shimmer runs at its own cadence (~40fps), independent of display refresh
+  // Shimmer runs at its own cadence (~40fps)
   if (currentScreen == SCREEN_PRINTING) {
     BambuState& sh = displayedPrinter().state;
     tickProgressShimmer(tft, 0, sh.progress, sh.printing);
   }
-  // Pong clock runs at ~50fps, independent of display refresh
+  // Pong clock runs at ~50fps
   if (currentScreen == SCREEN_CLOCK && dispSettings.pongClock) {
     tickPongClock();
   }
@@ -809,11 +804,9 @@ void updateDisplay() {
 
   // Detect screen change
   if (currentScreen != prevScreen) {
-    // Restore backlight when leaving SCREEN_OFF
     if (prevScreen == SCREEN_OFF && currentScreen != SCREEN_OFF) {
       setBacklight(brightness);
     }
-    // Reset text size in case Pong clock left it scaled up
     tft.setTextSize(1);
     tft.fillScreen(currentScreen == SCREEN_OFF ? TFT_BLACK : dispSettings.bgColor);
     forceRedraw = true;
@@ -829,7 +822,6 @@ void updateDisplay() {
 
   switch (currentScreen) {
     case SCREEN_SPLASH:
-      // Splash shown in initDisplay(), auto-advance handled by main.cpp
       break;
 
     case SCREEN_AP_MODE:
@@ -862,7 +854,6 @@ void updateDisplay() {
 
     case SCREEN_CLOCK:
       if (!dispSettings.pongClock) drawClock();
-      // Pong clock is ticked before the throttle (above)
       break;
 
     case SCREEN_OFF:
@@ -873,7 +864,6 @@ void updateDisplay() {
       break;
   }
 
-  // Save state for next smart-redraw comparison
   memcpy(&prevState, &displayedPrinter().state, sizeof(BambuState));
   forceRedraw = false;
 }

@@ -4,6 +4,6 @@
 #include <Arduino.h>
 
 void initButton();
-bool wasButtonPressed();  // returns true once per press (edge-detected, debounced)
+bool wasButtonPressed();  // returns true once per tap (edge-detected, debounced)
 
 #endif // BUTTON_H
